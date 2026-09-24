@@ -3,6 +3,7 @@
 import argparse
 import logging
 import platform
+import sys
 from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -52,9 +53,15 @@ def main():
         if platform.system() != 'Linux':
             logger.error("TUI is only available on Linux")
             return
-        # Placeholder for TUI
-        print("Launching TUI...")
-        print("Note: TUI implementation is not yet complete.")
+        # Import and run the TUI
+        try:
+            from ..tui import main as tui_main
+            curses.wrapper(tui_main)
+        except ImportError as e:
+            logger.error(f"Failed to import TUI module: {e}")
+            print("Error: TUI module not found. Please ensure the installation is complete.")
+        except Exception as e:
+            logger.error(f"Error running TUI: {e}")
     else:
         parser.print_help()
 
