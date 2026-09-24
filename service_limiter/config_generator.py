@@ -30,3 +30,4 @@ class ConfigGenerator:
         with open(path, 'w') as f:
             json.dump(config, f, indent=2)
         return path
+
