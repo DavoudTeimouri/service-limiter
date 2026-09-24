@@ -3,12 +3,12 @@
 import curses
 import sys
 import traceback
-from .orchestrator import Orchestrator
+from ..orchestrator import Orchestrator
 
 def main(stdscr):
     # Initialize curses
     curses.curs_set(0)  # Hide cursor
-    stdscr.nodelay(1)   # Non-blocking input
+    stdscr.nodelay(0)   # Blocking input
     stdscr.timeout(100) # Refresh every 100ms
 
     # Colors
@@ -24,7 +24,7 @@ def main(stdscr):
     menu_items = ["Analyze Services", "View Service Profiles", "Apply Limits (Placeholder)", "Quit"]
     current_menu = 0
     showing_services = False
-    services_list = []
+    services_list = []  # list of (service_name, profile_dict)
 
     while True:
         stdscr.clear()
@@ -41,7 +41,7 @@ def main(stdscr):
                 stdscr.addstr(4, 0, "No services analyzed yet. Run analysis first.", curses.color_pair(3))
             else:
                 for idx, (svc_name, profile) in enumerate(services_list):
-                    display_text = f"{svc_name}: CPU={profile.cpu_percent:.1f}% Mem={profile.memory_mb:.1f}MB IO_R={profile.io_read_kbps:.1f}KB/s IO_W={profile.io_write_kbps:.1f}KB/s"
+                    display_text = f"{svc_name}: CPU={profile.get('cpu_percent', 0.0):.1f}% Mem={profile.get('memory_mb', 0.0):.1f}MB IO_R={profile.get('io_read_kbps', 0.0):.1f}KB/s IO_W={profile.get('io_write_kbps', 0.0):.1f}KB/s"
                     if idx == selected_idx:
                         stdscr.addstr(4 + idx, 0, display_text[:w-1], curses.color_pair(4) | curses.A_REVERSE)
                     else:
@@ -83,13 +83,9 @@ def main(stdscr):
                     stdscr.addstr(0, 0, "Analyzing services...", curses.color_pair(2))
                     stdscr.refresh()
                     try:
+                        # We'll use the default policy (or we could ask for a profile, but for simplicity, use default)
                         analysis_result = orchestrator.run_analysis()
                         services_list = []
-                        for svc in analysis_result.get('services', []):
-                            # We need to get the profile for this service from the profiles list
-                            # For simplicity, we'll assume the order matches (which it does in our current implementation)
-                            pass
-                        # Actually, we have services and profiles in the result. Let's pair them by index.
                         services = analysis_result.get('services', [])
                         profiles = analysis_result.get('profiles', [])
                         for i in range(min(len(services), len(profiles))):
@@ -97,24 +93,24 @@ def main(stdscr):
                             prof = profiles[i]
                             services_list.append((
                                 svc.get('name', 'unknown'),
-                                type('Profile', (), {
+                                {
                                     'cpu_percent': prof.get('cpu_percent', 0.0),
                                     'memory_mb': prof.get('memory_mb', 0.0),
                                     'io_read_kbps': prof.get('io_read_kbps', 0.0),
                                     'io_write_kbps': prof.get('io_write_kbps', 0.0)
-                                })()
+                                }
                             ))
                         # If we have no profiles, we can still show services with zero values
                         if not profiles and services:
                             for svc in services:
                                 services_list.append((
                                     svc.get('name', 'unknown'),
-                                    type('Profile', (), {
+                                    {
                                         'cpu_percent': 0.0,
                                         'memory_mb': 0.0,
                                         'io_read_kbps': 0.0,
                                         'io_write_kbps': 0.0
-                                    })()
+                                    }
                                 ))
                     except Exception as e:
                         stdscr.addstr(2, 0, f"Error: {e}", curses.color_pair(4))
