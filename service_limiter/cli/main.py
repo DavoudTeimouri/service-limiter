@@ -4,7 +4,7 @@ import argparse
 import logging
 import platform
 import sys
-from .orchestrator import Orchestrator
+from ..orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 

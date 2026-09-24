@@ -1,3 +1,4 @@
+from typing import Dict, Any
 """Platform detection for Windows and Linux."""
 
 import platform

@@ -75,8 +75,8 @@ class ConfigGenerator:
         memory_limit_mb = config.get('memory_limit_mb', 512)
         # Convert memory limit to bytes
         memory_limit_bytes = memory_limit_mb * 1024 * 1024
-        # Build the PowerShell script
-        script = f'''# Generated PowerShell script to set Job Object limits for service: {service_name}
+        # Build the PowerShell script using a template to avoid f-string issues with '#'
+        template = '''# Generated PowerShell script to set Job Object limits for service: {service_name}
 # This script creates a Job Object named "ServiceLimiter_{service_name}" and sets CPU and memory limits.
 # Note: This script does not assign the service to the Job Object. You must assign the service's processes to the Job Object.
 # After running this script, you can use the following steps to assign the service:
@@ -113,6 +113,12 @@ Write-Host "  1. Get the service's process IDs: Get-WmiObject -Query \"SELECT Pr
 Write-Host "  2. For each PID, run: $job.AssignProcess(<PID>)"
 Write-Host "  3. Alternatively, restart the service within the Job Object (requires modifying the service to start in the Job Object)."
 '''
+        script = template.format(
+            service_name=service_name,
+            cpu_limit=cpu_limit,
+            memory_limit_mb=memory_limit_mb,
+            memory_limit_bytes=memory_limit_bytes
+        )
         with open(path, 'w') as f:
             f.write(script)
         return path
