@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import platform
 from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,14 @@ def main():
     if args.command == 'analyze':
         result = orchestrator.run_analysis()
         print(f"Analysis complete: {len(result.get('services', []))} services")
+        # Print a summary of the first few services
+        services = result.get('services', [])
+        if services:
+            print("First few services:")
+            for svc in services[:5]:
+                print(f"  - {svc.get('name', 'Unknown')}: {svc.get('display_name', '')} ({svc.get('status', '')})")
+        else:
+            print("No services found.")
     elif args.command == 'generate':
         # Placeholder
         print(f"Generating config for profile {args.profile} to {args.output}")
@@ -45,6 +54,7 @@ def main():
             return
         # Placeholder for TUI
         print("Launching TUI...")
+        print("Note: TUI implementation is not yet complete.")
     else:
         parser.print_help()
 
