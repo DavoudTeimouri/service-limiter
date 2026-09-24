@@ -1,0 +1,6 @@
+{
+  "cpu_percent": 50,
+  "memory_mb": 256,
+  "io_read_kbps": 512,
+  "io_write_kbps": 256
+}

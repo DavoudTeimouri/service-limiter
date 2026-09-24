@@ -2,6 +2,8 @@
 
 import logging
 import platform
+import json
+import os
 from .platform.detector import PlatformDetector
 from .models.shared_state import SharedState
 from .models.service_descriptor import ServiceDescriptor
@@ -20,12 +22,26 @@ else:
 logger = logging.getLogger(__name__)
 
 class Orchestrator:
-    def __init__(self, policy=None, output_dir=None):
+    def __init__(self, policy=None, output_dir=None, profile_name=None):
         self.detector = PlatformDetector()
         self.shared_state = SharedState()
         self.policy_engine = PolicyEngine()
         if policy is None:
-            self.policy = self.policy_engine.default_policies
+            # If a profile name is given, load it from the profiles directory
+            if profile_name is not None:
+                profile_path = os.path.join(os.path.dirname(__file__), 'profiles', f"{profile_name}.json")
+                if os.path.exists(profile_path):
+                    with open(profile_path, 'r') as f:
+                        profile_data = json.load(f)
+                    # Convert the profile data to the format expected by the policy engine
+                    # The profile data is a dict with keys: cpu_percent, memory_mb, io_read_kbps, io_write_kbps
+                    # We'll use these as the policy limits.
+                    self.policy = profile_data
+                else:
+                    logger.warning(f"Profile {profile_name} not found, using default policy")
+                    self.policy = self.policy_engine.default_policies
+            else:
+                self.policy = self.policy_engine.default_policies
         else:
             self.policy = policy
         self.output_dir = output_dir
@@ -97,8 +113,7 @@ class Orchestrator:
 
     def _apply_policies(self, profiles):
         """Apply resource policies to profiles.
-        Returns a list of limited service descriptors (or just the profiles that need limiting?).
-        We'll return a list of tuples (service_name, desired_limits) for services that exceed policy.
+        Returns a list of tuples (service_name, desired_limits) for services that exceed policy.
         For services within policy, we don't need to limit them.
         """
         limited = []
@@ -143,4 +158,3 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Failed to generate config for {service_name}: {e}")
         return generated
-

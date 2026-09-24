@@ -14,7 +14,7 @@ def main():
 
     # Analyze command
     analyze_parser = subparsers.add_parser('analyze', help='Analyze services')
-    analyze_parser.add_argument('--profile', help='Profile to use')
+    analyze_parser.add_argument('--profile', help='Profile to use (name of JSON file in profiles/ without .json)')
 
     # Generate command
     generate_parser = subparsers.add_parser('generate', help='Generate config')
@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    orchestrator = Orchestrator()
+    orchestrator = Orchestrator(profile_name=args.profile)
 
     if args.command == 'analyze':
         result = orchestrator.run_analysis()
