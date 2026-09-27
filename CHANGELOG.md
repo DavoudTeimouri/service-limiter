@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-09-27
+### Added
+- Added description and topics to the GitHub repository
+- Added detailed README and USER_GUIDE with samples and OS-specific details
+
 ## [0.1.0] - 2026-09-24
 
 ### Added
@@ -17,3 +22,5 @@ All notable changes to this project will be documented in this file.
 - Updated README and USER_GUIDE with technical writer feedback for clarity and completeness.
 - Documentation: README, USER_GUIDE, ARCHITECTURE, STRUCTURE, GITHUB_SETUP.
 
+- Added description and topics to the GitHub repository
+- Added detailed README and USER_GUIDE with samples and OS-specific details
