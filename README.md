@@ -8,15 +8,6 @@
 
 System administrators and developers need to control resource usage of services to prevent noisy neighbors and ensure system stability. Service Limiter provides a unified way to analyze, generate, and apply resource policies across Windows and Linux.
 
-## Quick Start
-
-```bash
-pip install service-limiter
-service-limiter analyze
-service-limiter generate --profile web-server --output ./config
-service-limiter apply --config ./config --dry-run
-```
-
 ## Features
 
 - Cross-platform service discovery (Windows WMI/PowerShell, Linux systemctl)
@@ -28,6 +19,15 @@ service-limiter apply --config ./config --dry-run
 - CLI and TUI (Linux only) for interactive analysis
 - Profile support for easy configuration of different service types
 - Human-in-the-loop design for applying configurations
+
+## Quick Start
+
+```bash
+pip install service-limiter
+service-limiter analyze
+service-limiter generate --profile web-server --output ./config
+service-limiter apply --config ./config --dry-run
+```
 
 ## Installation
 
@@ -55,11 +55,30 @@ service-limiter analyze
 ```
 Discovers running services and profiles their resource usage.
 
+Sample output:
+```
++----------------------+-------+--------+---------+----------+----------+--------+--------+
+| Service              | PID   | CPU %  | Mem MB  | Read KB/s| Write KB/s| Policy | Status |
++----------------------+-------+--------+---------+----------+----------+--------+--------+
+| Dhcp                 | 1234  | 0.5    | 45.2    | 10.5     | 5.2      | default| OK     |
+| WinDefend            | 5678  | 2.1    | 120.5   | 50.0     | 20.0     | default| VIOLATION (CPU, Mem) |
++----------------------+-------+--------+---------+----------+----------+--------+--------+
+```
+
 ### Generate Configuration
 ```bash
 service-limiter generate --profile web-server --output ./config
 ```
 Generates a configuration file based on the 'web-server' profile.
+
+Output directory structure:
+```
+./config/
+├── linux/
+│   └── <service_name>.override
+└── windows/
+    └── <service_name>_limits.ps1
+```
 
 ### Apply Configuration
 ```bash
@@ -100,6 +119,29 @@ These defaults can be overridden by creating a custom policy profile.
 ## Human-in-the-Loop
 
 For safety, changes that would affect more than 80% of resources or more than 100 services require explicit confirmation in the TUI or via the CLI.
+
+## OS-Specific Details
+
+### Linux
+- Uses systemd override files located in `/etc/systemd/system/<service>.d/`
+- Applies limits via `MemoryLimit`, `CPUQuota`, `IOReadBandwidthMax`, and `IOWriteBandwidthMax` directives
+- Requires `systemctl daemon-reload` and `systemctl restart <service>` after applying
+
+### Windows
+- Generates PowerShell scripts that create and configure Job Objects
+- Sets memory limits, CPU limits, and I/O bandwidth limits via Job Object APIs
+- Must be run as Administrator
+
+## Sample Output
+
+See the **Usage** section above for sample outputs of each command.
+
+## Troubleshooting
+
+- **Command not found**: Ensure you have installed the package with `pip install -e .` or used PyInstaller.
+- **No services detected**: On Linux, ensure you are running on a system with systemd. On Windows, ensure WMI is accessible.
+- **Permission denied**: Apply operations require root (Linux) or Administrator (Windows) privileges.
+- **Profile not found**: Ensure the profile JSON file exists in the `profiles/` directory.
 
 ## Contributing
 
