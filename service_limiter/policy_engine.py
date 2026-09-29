@@ -1,44 +1,46 @@
 """Policy engine for evaluating resource limits."""
 
-class PolicyEngine:
-    def __init__(self):
-        # Default policies (can be loaded from config)
-        self.default_policies = {
-            'cpu_percent': 80,   # max 80% CPU
-            'memory_mb': 512,    # max 512 MB
-            'io_read_kbps': 1024,# max 1 MB/s read
-            'io_write_kbps': 512 # max 512 KB/s write
-        }
+from typing import Dict, Any, List, Tuple
 
-    def evaluate(self, profile, policy=None):
-        """Evaluate if a resource profile is within the given policy.
-        Returns (bool, reason) where bool is True if within policy.
+
+class PolicyEngine:
+    """Evaluates resource usage against policies."""
+
+    def __init__(self):
+        # Default policies: CPU 80%, Memory 512MB, Read IO 1MB/s, Write IO 512KB/s
+        self.policies = [
+            {
+                "name": "default",
+                "cpu_percent": 80,
+                "memory_mb": 512,
+                "io_read_kbps": 1024,   # 1 MB/s
+                "io_write_kbps": 512,   # 512 KB/s
+            }
+        ]
+
+    def evaluate(self, profile: Dict[str, Any], policy: Dict[str, Any] = None) -> Tuple[bool, List[str]]:
+        """
+        Evaluate a resource profile against a policy.
+        Returns (is_over_limit, list_of_violations).
         """
         if policy is None:
-            policy = self.default_policies
-        # Check each metric
-        if profile.cpu_percent > policy.get('cpu_percent', float('inf')):
-            return False, f"CPU usage {profile.cpu_percent}% > limit {policy.get('cpu_percent')}%"
-        if profile.memory_mb > policy.get('memory_mb', float('inf')):
-            return False, f"Memory usage {profile.memory_mb}MB > limit {policy.get('memory_mb')}MB"
-        if profile.io_read_kbps > policy.get('io_read_kbps', float('inf')):
-            return False, f"IO read {profile.io_read_kbps}KB/s > limit {policy.get('io_read_kbps')}KB/s"
-        if profile.io_write_kbps > policy.get('io_write_kbps', float('inf')):
-            return False, f"IO write {profile.io_write_kbps}KB/s > limit {policy.get('io_write_kbps')}KB/s"
-        return True, "Within policy"
+            # Use the first default policy
+            policy = self.policies[0]
 
-    def get_exceeding_metrics(self, profile, policy=None):
-        """Return a dict of metrics that exceed the policy and by how much."""
-        if policy is None:
-            policy = self.default_policies
-        exceeding = {}
-        if profile.cpu_percent > policy.get('cpu_percent', float('inf')):
-            exceeding['cpu_percent'] = profile.cpu_percent - policy.get('cpu_percent', 0)
-        if profile.memory_mb > policy.get('memory_mb', float('inf')):
-            exceeding['memory_mb'] = profile.memory_mb - policy.get('memory_mb', 0)
-        if profile.io_read_kbps > policy.get('io_read_kbps', float('inf')):
-            exceeding['io_read_kbps'] = profile.io_read_kbps - policy.get('io_read_kbps', 0)
-        if profile.io_write_kbps > policy.get('io_write_kbps', float('inf')):
-            exceeding['io_write_kbps'] = profile.io_write_kbps - policy.get('io_write_kbps', 0)
-        return exceeding
+        violations = []
+        # Check CPU
+        if profile.get('cpu_percent', 0) > policy.get('cpu_percent', 80):
+            violations.append(f"CPU {profile.get('cpu_percent', 0)}% > {policy.get('cpu_percent', 80)}%")
+        # Check Memory
+        if profile.get('memory_mb', 0) > policy.get('memory_mb', 512):
+            violations.append(f"Memory {profile.get('memory_mb', 0)}MB > {policy.get('memory_mb', 512)}MB")
+        # Check Read IO
+        if profile.get('io_read_kbps', 0) > policy.get('io_read_kbps', 1024):
+            violations.append(f"Read IO {profile.get('io_read_kbps', 0)}KB/s > {policy.get('io_read_kbps', 1024)}KB/s")
+        # Check Write IO
+        if profile.get('io_write_kbps', 0) > policy.get('io_write_kbps', 512):
+            violations.append(f"Write IO {profile.get('io_write_kbps', 0)}KB/s > {policy.get('io_write_kbps', 512)}KB/s")
+
+        is_over = len(violations) > 0
+        return is_over, violations
 

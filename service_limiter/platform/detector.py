@@ -1,8 +1,8 @@
-from typing import Dict, Any
 """Platform detection for Windows and Linux."""
 
 import platform
 import sys
+from typing import Dict, Any
 
 class PlatformDetector:
     def detect(self) -> Dict[str, Any]:

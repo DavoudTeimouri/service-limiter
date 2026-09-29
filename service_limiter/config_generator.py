@@ -1,124 +1,129 @@
 """Configuration generator for OS-specific limits."""
 
+import logging
 import json
 import os
-import platform
+from typing import Dict, Any, List
+from .platform.detector import PlatformDetector
+from .models.service_descriptor import ServiceDescriptor
+
+logger = logging.getLogger(__name__)
 
 class ConfigGenerator:
-    def __init__(self, output_dir):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+    """Generates OS-specific configuration files for services that need limiting."""
 
-    def generate(self, limited_service):
-        """Generate a config dict for a service (to be implemented per OS)."""
-        # This is a placeholder. In a real implementation, we would generate:
-        # - For Linux: systemd override snippets (CPUQuota, MemoryMax, etc.)
-        # - For Windows: Job Object settings or via registry/WMI.
-        # For now, we just return a dict representing the desired limits.
+    def generate(self, limited_services: List[ServiceDescriptor], policy: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate configuration files for the given limited services.
+        Returns a dictionary mapping service name to config data (which is another dict).
+        The config data will be written to files by the apply step.
+        """
+        platform_info = PlatformDetector().detect()
+        configs = {}
+        for service in limited_services:
+            if platform_info['is_linux']:
+                configs[service.name] = self._generate_linux_config(service, policy)
+            elif platform_info['is_windows']:
+                configs[service.name] = self._generate_windows_config(service, policy)
+            else:
+                logger.warning(f"Unsupported platform for config generation: {platform_info['system']}")
+                configs[service.name] = {}
+        return configs
+
+    def _generate_linux_config(self, service: ServiceDescriptor, policy: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate Linux systemd override config."""
+        # We'll create a dictionary that represents the content of the override.conf file.
+        # The apply step will write this to /etc/systemd/system/<service>.service.d/override.conf
+        content = f"""[Service]
+CPUQuota={policy.get('cpu_percent', 80)}%
+MemoryMax={policy.get('memory_mb', 512)}M
+"""
+        # Note: IO limits in systemd are a bit more complex. We'll use ReadBandwidthMax and WriteBandwidthMax.
+        # These are in bytes per second. We have kbps in policy, so convert to bytes per second: * 1024
+        read_bps = policy.get('io_read_kbps', 1024) * 1024
+        write_bps = policy.get('io_write_kbps', 512) * 1024
+        content += f"""ReadBandwidthMax={read_bps}
+WriteBandwidthMax={write_bps}
+"""
         return {
-            'service_name': limited_service.name,
-            'cpu_limit_percent': 80,   # example
-            'memory_limit_mb': 512,
-            'io_read_limit_kbps': 1024,
-            'io_write_limit_kbps': 512
+            'content': content,
+            'file_path': f"/etc/systemd/system/{service.name}.service.d/override.conf",
+            'directory': f"/etc/systemd/system/{service.name}.service.d"
         }
 
-    def write_config(self, service_name, config):
-        """Write the config to a file in the output directory.
-        For Linux: generates a systemd override file.
-        For Windows: generates a PowerShell script to set Job Object limits.
-        """
-        system = platform.system()
-        if system == 'Linux':
-            return self._write_linux_config(service_name, config)
-        elif system == 'Windows':
-            return self._write_windows_config(service_name, config)
-        else:
-            raise NotImplementedError(f"Unsupported platform: {system}")
+    def _generate_windows_config(self, service: ServiceDescriptor, policy: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate Windows PowerShell script to create and configure a Job Object."""
+        # We'll generate a PowerShell script that creates a Job Object and sets limits.
+        # Note: Applying the Job Object to a service is complex and requires knowing the service's PID.
+        # We'll generate a script that creates the Job Object and then the user must assign the service's processes to it.
+        # Alternatively, we can try to get the service's PID and assign it in the script, but that is more complex.
+        # We'll generate a script that creates the Job Object and sets the limits, and then outputs the Job Object handle.
+        # The user can then use that handle to assign processes.
+        # We'll also note that the script should be run as Administrator.
+        cpu_limit = policy.get('cpu_percent', 80)  # percent
+        memory_limit = policy.get('memory_mb', 512) * 1024 * 1024  # convert MB to bytes
+        read_io_limit = policy.get('io_read_kbps', 1024) * 1024  # convert KB/s to bytes/s
+        write_io_limit = policy.get('io_write_kbps', 512) * 1024  # convert KB/s to bytes/s
 
-    def _write_linux_config(self, service_name, config):
-        """Generate systemd override file for Linux."""
-        # Create directory: <output_dir>/<service_name>/ (to avoid conflicts)
-        service_dir = os.path.join(self.output_dir, service_name)
-        os.makedirs(service_dir, exist_ok=True)
-        # File name: override.conf
-        file_name = 'override.conf'
-        path = os.path.join(service_dir, file_name)
-        # Build the content
-        cpu_quota = config.get('cpu_limit_percent', 80)
-        memory_max = config.get('memory_limit_mb', 512)
-        io_read = config.get('io_read_limit_kbps', 1024)
-        io_write = config.get('io_write_limit_kbps', 512)
-        # Note: CPUQuota is a percentage (e.g., 80% -> 80)
-        # MemoryMax: in bytes, we can use M for megabytes (e.g., 512M)
-        # IO: ReadBandwidthMax and WriteBandwidthMax in bytes per second, we use K for kilobytes per second (e.g., 1024K = 1MB/s)
-        lines = [
-            '[Service]',
-            f'CPUQuota={cpu_quota}%',
-            f'MemoryMax={memory_max}M',
-            f'ReadBandwidthMax={io_read}K',
-            f'WriteBandwidthMax={io_write}K',
-        ]
-        content = '\n'.join(lines)
-        with open(path, 'w') as f:
-            f.write(content)
-        return path
+        # Note: Windows Job Object limits are in different units:
+        # - CPU limit: we can set a limit per process in the job object? Actually, we can set a CPU rate control (Windows 8+).
+        #   We'll use the CPU rate control: set the CPU rate to (cpu_limit / 100) * 100? Actually, the CPU rate is in percent of a CPU.
+        #   We'll set the CPU rate to cpu_limit (so 80 means 80% of a CPU).
+        # - Memory limit: we can set the job memory limit.
+        # - IO limits: we can set IO rate control (Windows 8+).
+        # We'll generate a script that uses the Set-JobObject cmdlet if available, or use the Win32 API via PowerShell.
+        # For simplicity, we'll use the Set-JobObject cmdlet (requires Windows 8+).
+        # We'll create a job object, set the limits, and then return the job object handle.
 
-    def _write_windows_config(self, service_name, config):
-        """Generate PowerShell script to set Job Object limits for Windows."""
-        # Create directory: <output_dir>/<service_name>/
-        service_dir = os.path.join(self.output_dir, service_name)
-        os.makedirs(service_dir, exist_ok=True)
-        file_name = 'Set-JobLimits.ps1'
-        path = os.path.join(service_dir, file_name)
-        cpu_limit = config.get('cpu_limit_percent', 80)
-        memory_limit_mb = config.get('memory_limit_mb', 512)
-        # Convert memory limit to bytes
-        memory_limit_bytes = memory_limit_mb * 1024 * 1024
-        # Build the PowerShell script using a template to avoid f-string issues with '#'
-        template = '''# Generated PowerShell script to set Job Object limits for service: {service_name}
-# This script creates a Job Object named "ServiceLimiter_{service_name}" and sets CPU and memory limits.
-# Note: This script does not assign the service to the Job Object. You must assign the service's processes to the Job Object.
-# After running this script, you can use the following steps to assign the service:
-#   1. Get the process IDs of the service (using Get-Service or Get-WmiObject -Query "SELECT ProcessId FROM Win32_Service WHERE Name='{service_name}'")
-#   2. For each PID, use the command: $job.AssignProcess($pid)
-#   3. Alternatively, restart the service within the Job Object by creating a new process in the Job Object that starts the service.
+        ps_script = f"""# Generated PowerShell script to create a Job Object for service '{service.name}'
+# This script creates a Job Object and sets resource limits.
+# To apply the Job Object to a service, you need to assign the service's processes to this Job Object.
+# Run this script as Administrator.
 
-# Define Job Object name
-$JobName = "ServiceLimiter_{service_name}"
+$JobName = "ServiceLimiter_{service.name}"
 
-# Try to get existing Job Object
-$Job = Get-WmiObject -Query "SELECT * FROM Win32_JobObject WHERE Name = '$JobName'" -ErrorAction SilentlyContinue
-if (-not $Job) {
-    # Create new Job Object
-    $Job = [wmiclass]"Win32_JobObject".CreateInstance()
-    $Job.Name = $JobName
-    $Job.Put()
-    $Job = Get-WmiObject -Query "SELECT * FROM Win32_JobObject WHERE Name = '$JobName'"
-}
+# Try to remove the job object if it already exists
+try {{
+    Get-JobObject -Name $JobName | Remove-JobObject
+}} catch {{
+    # Ignore if it doesn't exist
+}}
 
-# Set CPU rate control (percentage of CPU time)
-$CpuSetting = [wmiclass]"Win32_JobObject_CPU_Rate_Control_Information".CreateInstance()
-$CpuSetting.Control = 1  # Enable CPU rate control
-$CpuSetting.Rate = {cpu_limit}  # e.g., 80 for 80%
-$Job.CPUTRateControl = $CpuSetting
-$Job.Put()
+# Create a new job object
+$Job = New-JobObject -Name $JobName
 
-# Set job-wide memory limit (in bytes)
-$Job.SetJobLimits({memory_limit_bytes}, 0)  # Second parameter is per-process memory limit (0 means no limit)
+# Set CPU rate control (if supported)
+try {{
+    Set-JobObject -Job $Job -CPURate {cpu_limit}
+}} catch {{
+    Write-Warning "Failed to set CPU rate limit. This requires Windows 8 or later." }}
 
-Write-Host "Job Object '$JobName' created with CPU limit {cpu_limit}% and memory limit {memory_limit_mb} MB."
-Write-Host "To assign the service's processes to this Job Object:"
-Write-Host "  1. Get the service's process IDs: Get-WmiObject -Query \"SELECT ProcessId FROM Win32_Service WHERE Name='{service_name}'\""
-Write-Host "  2. For each PID, run: $job.AssignProcess(<PID>)"
-Write-Host "  3. Alternatively, restart the service within the Job Object (requires modifying the service to start in the Job Object)."
-'''
-        script = template.format(
-            service_name=service_name,
-            cpu_limit=cpu_limit,
-            memory_limit_mb=memory_limit_mb,
-            memory_limit_bytes=memory_limit_bytes
-        )
-        with open(path, 'w') as f:
-            f.write(script)
-        return path
+# Set memory limit
+try {{
+    Set-JobObject -Job $Job -MemoryLimit {memory_limit}
+}} catch {{
+    Write-Warning "Failed to set memory limit." }}
+
+# Set IO read bandwidth limit (if supported)
+try {{
+    Set-JobObject -Job $Job -IOReadBandwidth {read_io_limit}
+}} catch {{
+    Write-Warning "Failed to set IO read bandwidth limit. This requires Windows 8 or later." }}
+
+# Set IO write bandwidth limit (if supported)
+try {{
+    Set-JobObject -Job $Job -IOWriteBandwidth {write_io_limit}
+}} catch {{
+    Write-Warning "Failed to set IO write bandwidth limit. This requires Windows 8 or later." }}
+
+# Output the job object handle for the user to assign processes
+Write-Output "Job Object created. Assign processes to this job object using the handle: $Job.Handle"
+Write-Output "To get the service's process IDs, run: Get-WmiObject -Query \"SELECT ProcessId FROM Win32_Service WHERE Name='{service.name}'\""
+Write-Output "Then for each PID, run: \$job.AssignProcess(<PID>)"
+"""
+        return {
+            'content': ps_script,
+            'file_path': f"C:\\ServiceLimiter\\{service.name}-JobLimits.ps1",
+            'directory': "C:\\ServiceLimiter"
+        }
+

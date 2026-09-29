@@ -1,0 +1,5 @@
+psutil>=5.9.0
+
+[dev]
+pytest>=7.0.0
+pyinstaller>=5.0.0
