@@ -88,9 +88,13 @@ def main(stdscr):
                         services_list = []
                         services = analysis_result.get('services', [])
                         profiles = analysis_result.get('profiles', [])
-                        for i in range(min(len(services), len(profiles))):
-                            svc = services[i]
-                            prof = profiles[i]
+                        # Look profiles up BY NAME. Pairing by index showed the
+                        # wrong service's numbers whenever a profile was missing.
+                        by_name = {p.get('service_name'): p for p in profiles}
+                        for svc in services:
+                            prof = by_name.get(svc.get('name'))
+                            if prof is None:
+                                continue
                             services_list.append((
                                 svc.get('name', 'unknown'),
                                 {

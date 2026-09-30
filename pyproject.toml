@@ -23,6 +23,17 @@ dependencies = [
     "psutil>=5.9.0",
 ]
 
+[tool.setuptools]
+packages = [
+    "service_limiter",
+    "service_limiter.cli",
+    "service_limiter.models",
+    "service_limiter.platform",
+]
+
+[tool.setuptools.package-data]
+service_limiter = ["profiles/*.json"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",

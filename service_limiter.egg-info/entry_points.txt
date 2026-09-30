@@ -1,2 +1,0 @@
-[console_scripts]
-service-limiter = service_limiter.cli.main:main

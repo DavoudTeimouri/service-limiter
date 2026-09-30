@@ -9,7 +9,6 @@ from .models.shared_state import SharedState
 from .models.service_descriptor import ServiceDescriptor
 from .models.resource_profile import ResourceProfile
 from .policy_engine import PolicyEngine
-from .config_generator import ConfigGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -18,26 +17,30 @@ class Orchestrator:
         self.detector = PlatformDetector()
         self.shared_state = SharedState()
         self.policy_engine = PolicyEngine()
-        self.config_generator = ConfigGenerator()
         self.profile = None
         if profile_name:
             self.profile = self._load_profile(profile_name)
 
     def _load_profile(self, profile_name: str) -> Dict[str, Any]:
-        """Load a profile from the profiles directory."""
+        """Load a profile JSON shipped inside the package."""
+        from importlib.resources import files
+        profile_path = files("service_limiter") / "profiles" / f"{profile_name}.json"
         try:
-            # Get the absolute path to the profiles directory
-            base_dir = os.path.dirname(__file__)
-            profiles_dir = os.path.join(base_dir, '..', 'profiles')
-            profile_path = os.path.join(profiles_dir, f'{profile_name}.json')
-            with open(profile_path, 'r') as f:
-                return json.load(f)
+            return json.loads(profile_path.read_text())
         except FileNotFoundError:
-            logger.warning(f"Profile {profile_name} not found, using default policies.")
-            return None
+            raise SystemExit(
+                f"Profile '{profile_name}' not found. Available: "
+                f"{', '.join(self.available_profiles())}"
+            )
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in profile {profile_name}: {e}")
-            return None
+            raise SystemExit(f"Invalid JSON in profile '{profile_name}': {e}")
+
+    @staticmethod
+    def available_profiles() -> List[str]:
+        """Names of bundled profiles, without the .json suffix."""
+        from importlib.resources import files
+        profiles_dir = files("service_limiter") / "profiles"
+        return sorted(p.name[:-5] for p in profiles_dir.iterdir() if p.name.endswith(".json"))
 
     def run_analysis(self) -> Dict[str, Any]:
         """Run full analysis pipeline."""
@@ -168,13 +171,26 @@ class Orchestrator:
 CPUQuota={policy.get('cpu_percent', 80)}%
 MemoryMax={policy.get('memory_mb', 512)}M
 """
-        # Note: IO limits in systemd are a bit more complex. We'll use ReadBandwidthMax and WriteBandwidthMax.
-        # These are in bytes per second. We have kbps in policy, so convert to bytes per second: * 1024
-        read_bps = policy.get('io_read_kbps', 1024) * 1024
-        write_bps = policy.get('io_write_kbps', 512) * 1024
-        content += f"""ReadBandwidthMax={read_bps}
-WriteBandwidthMax={write_bps}
+        # systemd I/O bandwidth limits are PER DEVICE and need the unified cgroup
+        # hierarchy (io.max). Correct directive names are IOReadBandwidthMax /
+        # IOWriteBandwidthMax, each taking "<device> <bytes-per-second>".
+        # The old ReadBandwidthMax/WriteBandwidthMax were not real keys: systemd
+        # ignored them silently, so no I/O limit was ever applied.
+        device = policy.get('io_device', '')
+        if device:
+            read_bps = policy.get('io_read_kbps', 1024) * 1024
+            write_bps = policy.get('io_write_kbps', 512) * 1024
+            content += f"""IOAccounting=yes
+IOReadBandwidthMax={device} {read_bps}
+IOWriteBandwidthMax={device} {write_bps}
 """
+        else:
+            # ponytail: no io_device in the policy -> I/O limits are skipped rather
+            # than emitted invalid. Add an io_device field to profiles to enable.
+            logger.warning(
+                "Policy has no 'io_device'; skipping I/O bandwidth limits "
+                "(systemd requires a block device path)."
+            )
         return {
             'content': content,
             'file_path': f"/etc/systemd/system/{service.name}.service.d/override.conf",
@@ -182,81 +198,100 @@ WriteBandwidthMax={write_bps}
         }
 
     def _generate_windows_config(self, service: ServiceDescriptor, policy: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate Windows PowerShell script to create and configure a Job Object."""
-        # We'll generate a PowerShell script that creates a Job Object and sets limits.
-        # Note: Applying the Job Object to a service is complex and requires knowing the service's PID.
-        # We'll generate a script that creates the Job Object and then the user must assign the service's processes to it.
-        # Alternatively, we can try to get the service's PID and assign it in the script, but that is more complex.
-        # We'll generate a script that creates the Job Object and sets the limits, and then outputs the Job Object handle.
-        # The user can then use that handle to assign processes.
-        # We'll also note that the script should be run as Administrator.
-        cpu_limit = policy.get('cpu_percent', 80)  # percent
-        memory_limit = policy.get('memory_mb', 512) * 1024 * 1024  # convert MB to bytes
-        read_io_limit = policy.get('io_read_kbps', 1024) * 1024  # convert KB/s to bytes/s
-        write_io_limit = policy.get('io_write_kbps', 512) * 1024  # convert KB/s to bytes/s
+        """Generate a PowerShell script that limits a service via a Job Object.
 
-        # Note: Windows Job Object limits are in different units:
-        # - CPU limit: we can set a limit per process in the job object? Actually, we can set a CPU rate control (Windows 8+).
-        #   We'll use the CPU rate control: set the CPU rate to (cpu_limit / 100) * 100? Actually, the CPU rate is in percent of a CPU.
-        #   We'll set the CPU rate to cpu_limit (so 80 means 80% of a CPU).
-        # - Memory limit: we can set the job memory limit.
-        # - IO limits: we can set IO rate control (Windows 8+).
-        # We'll generate a script that uses the Set-JobObject cmdlet if available, or use the Win32 API via PowerShell.
-        # For simplicity, we'll use the Set-JobObject cmdlet (requires Windows 8+).
-        # We'll create a job object, set the limits, and then return the job object handle.
+        Windows Job Objects are a Win32 kernel API. PowerShell ships NO built-in
+        cmdlets for them (New-JobObject / Set-JobObject / Get-JobObject /
+        Remove-JobObject do not exist), so the script P/Invokes kernel32 via
+        Add-Type and assigns the service's own process to the new job.
+        """
+        mem_bytes = policy.get('memory_mb', 512) * 1024 * 1024
+        read_bps = policy.get('io_read_kbps', 1024) * 1024
+        write_bps = policy.get('io_write_kbps', 512) * 1024
+        # JOB_OBJECT_LIMIT_RATE_HARD expresses CPU as units of 1/10000 of a CPU.
+        cpu_rate = int(policy.get('cpu_percent', 80)) * 100
 
-        ps_script = f"""# Generated PowerShell script to create a Job Object for service '{service.name}'
-# This script creates a Job Object and sets resource limits.
-# To apply the Job Object to a service, you need to assign the service's processes to this Job Object.
-# Run this script as Administrator.
+        ps_script = """# Generated by service-limiter: Job Object limits for service '{service}'
+# Run as Administrator (elevated). Requires Windows 8 or newer.
+$ErrorActionPreference = 'Stop'
 
-$JobName = "ServiceLimiter_{service.name}"
+Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class SLJob {{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS {{
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {{
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {{
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }}
 
-# Try to remove the job object if it already exists
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(IntPtr job, int cls, IntPtr info, uint len);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+}}
+"@
+
+$svc = Get-CimInstance Win32_Service -Filter "Name='{service}'"
+if (-not $svc) {{ Write-Error "Service '{service}' not found"; exit 1 }}
+if ($svc.ProcessId -eq 0) {{ Write-Error "Service '{service}' is not running"; exit 1 }}
+
+$job = [SLJob]::CreateJobObject([IntPtr]::Zero, $null)
+if ($job -eq [IntPtr]::Zero) {{ throw "CreateJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }}
+
+$info = New-Object SLJob+JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+$info.BasicLimitInformation.LimitFlags = 0x00000020 -bor 0x00000400   # JOB_MEMORY | JOB_IO_RATE
+$info.JobMemoryLimit = [UIntPtr]{mem_bytes}
+$info.IoInfo.ReadTransferCount = {read_bps}
+$info.IoInfo.WriteTransferCount = {write_bps}
+
+$len = [Runtime.InteropServices.Marshal]::SizeOf($info)
+$ptr = [Runtime.InteropServices.Marshal]::AllocHGlobal($len)
 try {{
-    Get-JobObject -Name $JobName | Remove-JobObject
-}} catch {{
-    # Ignore if it doesn't exist
+    [Runtime.InteropServices.Marshal]::StructureToPtr($info, $ptr, $false)
+    if (-not [SLJob]::SetInformationJobObject($job, 9, $ptr, $len)) {{
+        throw "SetInformationJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }}
+}} finally {{
+    [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
 }}
 
-# Create a new job object
-$Job = New-JobObject -Name $JobName
-
-# Set CPU rate control (if supported)
-try {{
-    Set-JobObject -Job $Job -CPURate {cpu_limit}
-}} catch {{
-    Write-Warning "Failed to set CPU rate limit. This requires Windows 8 or later."
+$PROCESS_QUERY_SET_INFORMATION = 0x0400
+$PROCESS_TERMINATE = 0x0001
+$h = [SLJob]::OpenProcess($PROCESS_QUERY_SET_INFORMATION -bor $PROCESS_TERMINATE, $false, $svc.ProcessId)
+if ($h -eq [IntPtr]::Zero) {{ throw "OpenProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }}
+if (-not [SLJob]::AssignProcessToJobObject($job, $h)) {{
+    Write-Warning "AssignProcessToJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    Write-Warning "The service may already run inside a job object (common under IIS or a service host)."
+}} else {{
+    Write-Output "Applied memory={{mem_bytes}}B IO={{read_bps}}/{{write_bps}}B/s to PID $($svc.ProcessId)"
+    Write-Output "Note: the job handle is released when this script exits; limits lapse with it."
 }}
+""".format(service=service.name, mem_bytes=mem_bytes, read_bps=read_bps,
+           write_bps=write_bps)
 
-# Set memory limit
-try {{
-    Set-JobObject -Job $Job -MemoryLimit {memory_limit}
-}} catch {{
-    Write-Warning "Failed to set memory limit."
-}}
-
-# Set IO read bandwidth limit (if supported)
-try {{
-    Set-JobObject -Job $Job -IOReadBandwidth {read_io_limit}
-}} catch {{
-    Write-Warning "Failed to set IO read bandwidth limit. This requires Windows 8 or later."
-}}
-
-# Set IO write bandwidth limit (if supported)
-try {{
-    Set-JobObject -Job $Job -IOWriteBandwidth {write_io_limit}
-}} catch {{
-    Write-Warning "Failed to set IO write bandwidth limit. This requires Windows 8 or later."
-}}
-
-# Output the job object handle for the user to assign processes
-Write-Output "Job Object created. Assign processes to this job object using the handle: $Job.Handle"
-Write-Output "To get the service's process IDs, run: Get-WmiObject -Query \"SELECT ProcessId FROM Win32_Service WHERE Name='{service.name}'\""
-Write-Output "Then for each PID, run: $job.AssignProcess(<PID>)"
-"""
         return {
             'content': ps_script,
-            'file_path': f"C:\\ServiceLimiter\\{service.name}-JobLimits.ps1",
+            'file_path': f"C:\\ServiceLimiter\\{service.name}\\Set-JobLimits.ps1",
             'directory': "C:\\ServiceLimiter"
         }
