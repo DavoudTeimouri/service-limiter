@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.11', '3.12']
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            python-version: '3.12'
+            platform: linux
+          - os: windows-latest
+            python-version: '3.12'
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e .[dev]
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Test
+        run: python -m unittest discover -s tests -v
+      - name: Build wheel
+        run: python -m build --wheel
+      - name: Install wheel and smoke test
+        run: |
+          pip install dist/*.whl
+          service-limiter --help
+          # Linux: verify systemd-analyze if available
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            if command -v systemd-analyze >/dev/null; then
+              service-limiter generate --profile web-server --output /tmp/smoke
+              echo "[Service]" > /tmp/smoke/sshd/override.conf
+              echo "CPUQuota=50%" >> /tmp/smoke/sshd/override.conf
+              echo "MemoryMax=256M" >> /tmp/smoke/sshd/override.conf
+              echo "IOAccounting=yes" >> /tmp/smoke/sshd/override.conf
+              echo "IOReadBandwidthMax=/dev/sda1 524288" >> /tmp/smoke/sshd/override.conf
+              echo "IOWriteBandwidthMax=/dev/sda1 262144" >> /tmp/smoke/sshd/override.conf
+              service-limiter apply --config /tmp/smoke --dry-run
+              systemd-analyze verify /tmp/smoke/sshd/override.conf
+            fi
+          fi
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build deps
+        run: pip install build
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

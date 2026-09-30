@@ -5,23 +5,36 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "service-limiter"
 version = "0.1.0"
-description = "Cross-platform service resource limiter"
+description = "Cross-platform service resource limiter (Linux systemd / Windows Job Objects)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name"}
+    {name = "Davoud Teimouri"}
 ]
-keywords = ["windows", "linux", "services", "resource", "limiting"]
+keywords = ["windows", "linux", "services", "resource", "limiting", "systemd", "job-object"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Systems Administration",
 ]
 dependencies = [
     "psutil>=5.9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/DavoudTeimouri/service-limiter"
+Repository = "https://github.com/DavoudTeimouri/service-limiter"
+Issues = "https://github.com/DavoudTeimouri/service-limiter/issues"
 
 [tool.setuptools]
 packages = [
@@ -38,7 +51,14 @@ service_limiter = ["profiles/*.json"]
 dev = [
     "pytest>=7.0.0",
     "pyinstaller>=5.0.0",
+    "ruff>=0.5.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+lint.select = ["E", "F", "I", "UP", "W"]
+lint.ignore = ["E501"]
 
 [project.scripts]
 service-limiter = "service_limiter.cli.main:main"
