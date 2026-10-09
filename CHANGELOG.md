@@ -7,32 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-- `apply --durable` (Windows): holds the Job Object handle open in a background process so limits do not lapse when the script exits
-- Logged every analyze/generate/apply event to `~/.service-limiter/audit.log` as JSONL
-- CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, issue and pull request templates
-- LOGIC.md: durable reference for how the tool works and the domain traps it respects
+### Changed
+### Fixed
+### Removed
+
+## [2.0.0] - 2026-10-09
+
+Rust rewrite. No interpreter, no runtime dependencies, ~1 MB static binary.
+See [MIGRATING.md](MIGRATING.md) if you used the Python 1.x CLI.
+
+### Breaking changes
+- Install method changed: `pip install service-limiter` no longer works. Use a release binary (`service-limiter-linux-x86_64.tar.gz`, `service-limiter-linux-aarch64.tar.gz`, `service-limiter-windows-x86_64.zip`, each with a `.sha256`) or `cargo install --git https://github.com/DavoudTeimouri/service-limiter.git`. The PyPI package stays frozen at 1.0.0
+- The Python implementation, `pyproject.toml`, and the curses TUI are removed
+- `--durable` is accepted but not implemented in the Rust build; it warns instead of silently doing nothing new
+- The audit log is not written yet. `~/.service-limiter/audit.log` was written by 1.x and is not written by 2.0.0
+
+### Unchanged on purpose
+- Command name and all flags: `service-limiter {analyze,generate,apply}` with `--profile`, `--output`, `--config`, `--dry-run`, `--yes`
+- Exit codes: 0 ok, 1 violation, 2 error, 3 needs-root
+- Profile JSON schema
+- Staging layout `<output>/<service>/override.conf` and `<output>/<service>/Set-JobLimits.ps1`
+- Generated systemd drop-in text, byte for byte
+
+### Added
+- Rust implementation: clap CLI, serde models, sysinfo-based process-tree measurement, `windows-sys` Job Object FFI on Windows
+- `platform::sample_tree` shared by both platforms, so measurement cannot drift between them
+- `src/job_limits.ps1` is a real file embedded with `include_str!`, shared verbatim with 1.x rather than duplicated
+- Integration tests pinning the exit-code contract
+- `apply` validates a drop-in with `systemd-analyze verify` and refuses before touching `/etc` if systemd rejects it
+- Sample rates divide by measured elapsed time rather than the requested interval
+- Release binaries for linux-x86_64, linux-aarch64, and windows-x86_64 with sha256 checksums, built by CI
+- CI runs fmt, clippy `-D warnings`, and tests on both Linux and Windows; a cross-compile check covers the Windows target on Linux
 
 ### Changed
-- Windows Job Object limits now use the documented Win32 information classes instead of a single mislabelled flag field
-- `apply` without `--durable` now says out loud that Windows limits will lapse
-- README rewritten against the real CLI: corrected systemd directives, added exit codes, audit log, and an honest platform matrix
-- USER_GUIDE.md folded into README and removed (was ~90% duplicate)
-- profiles are loaded from package data; the repo-root profiles/ duplicate is deleted
+- CPU and memory limits below 1 clamp to 1, so `CPUQuota=0%` (which systemd reads as never run) is never emitted
+- Profiles are compiled into the binary with `include_str!`; a missing profile lists what is available
+- `analyze` skips and reports services it cannot measure rather than recording zero usage
+- Platform dispatch is `cfg`-gated rather than runtime `if/elif` ladders
 
 ### Fixed
-- Windows memory limit never applied: LimitFlags used 0x20 (JOB_OBJECT_LIMIT_PRIORITY_CLASS) and 0x400 (DIE_ON_UNHANDLED_EXCEPTION) while commented JOB_MEMORY|JOB_IO_RATE. Real JOB_OBJECT_LIMIT_JOB_MEMORY is 0x00000200
-- Windows I/O limits were written into JOBOBJECT_EXTENDED_LIMIT_INFORMATION.IoInfo, which holds read-only IO_COUNTERS accounting counters and is a silent no-op. Now uses JOBOBJECT_IO_RATE_CONTROL_INFORMATION
-- Windows applied no CPU limit at all: cpu_rate was computed in Python but never interpolated into the script
-- PowerShell script no longer claims success when AssignProcessToJobObject fails; it exits 2
-- `tui` on a non-Linux host exited 0 on failure; now exits 2
-- `generate` exited a bare literal 1 when nothing exceeded the policy, which aborted `set -e` scripts on a clean run; now exits 0
-- Every SLJob struct the script instantiates is now declared in the C# shim
-- 5 new Windows tests assert the real flag value, that IO_COUNTERS is never written, that CpuRate is interpolated, that it clamps at 10000, and that structs are declared. The previous test only grepped for API names, which is how these bugs shipped
+- Windows memory limit never applied: 1.x set `0x20` (`JOB_OBJECT_LIMIT_PRIORITY_CLASS`) and `0x400` (`DIE_ON_UNHANDLED_EXCEPTION`) while commenting them as `JOB_MEMORY|JOB_IO_RATE`. The real `JOB_OBJECT_LIMIT_JOB_MEMORY` is `0x00000200`
+- Windows I/O limits were written into `JOBOBJECT_EXTENDED_LIMIT_INFORMATION.IoInfo`, which holds read-only `IO_COUNTERS` accounting values, making the limit a silent no-op. 2.0.0 uses `JOBOBJECT_IO_RATE_CONTROL_INFORMATION`
+- Windows applied no CPU limit at all: 1.x computed `cpu_rate` in Python and never interpolated it
+- Windows `apply` no longer reports success when `AssignProcessToJobObject` fails; it exits non-zero
+- The test that let the flag bugs ship only grepped generated text for API names. 2.0.0 asserts the actual flag value, that `IO_COUNTERS` is never written, that `CpuRate` is interpolated and clamped, and that every struct the script instantiates is declared
 
 ### Removed
-- architecture.md, STRUCTURE.md, GITHUB_SETUP.md (stale; described a ConfigGenerator, subagents, and a Textual TUI that no longer exist)
-- USER_GUIDE.md (folded into README)
-- Repo-root profiles/ directory (byte-identical duplicate that is never loaded)
+- Python implementation (`service_limiter/`), `pyproject.toml`, and its test suite, after the Rust suite matched it
+- The curses TUI: Linux-only, read-only, and duplicating what `analyze` prints
+- Root `profiles/` duplicate that was never loaded
+- `architecture.md`, `STRUCTURE.md`, `GITHUB_SETUP.md`, and `USER_GUIDE.md` (superseded by README and LOGIC.md)
+- `SharedState` (a mutable bag with a single consumer)
+
+### Known limitations
+- `--durable` and the audit log are not implemented in the Rust build yet
+- `CPUQuota` is a share of one CPU while `cpu_percent` reads as a whole-machine share; still unresolved
+- Linux I/O limits require an `io_device` in the profile
+- Windows measures only the service's main PID; Linux walks the child tree
+- Windows limits are not durable unless a future release adds a handle holder
 
 ## [1.0.0] - 2026-09-30
 ### Added

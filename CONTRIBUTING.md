@@ -5,24 +5,25 @@
 ```bash
 git clone git@github.com:DavoudTeimouri/service-limiter.git
 cd service-limiter
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .[dev]
+cargo build
 ```
 
 ## Tests
 
-The suite is stdlib `unittest`, no pytest needed:
+No test framework beyond `cargo test`:
 
 ```bash
-python3 -m unittest discover -s tests -v
+cargo test
 ```
 
 ## Before you push
 
-- `python3 -m unittest discover -s tests` passes
-- `ruff check .` clean
-- If you changed a generated config, the matching test in `tests/test_service_limiter.py`
-  changed too
+- `cargo test` passes
+- `cargo clippy --all-targets -- -D warnings` clean
+- `cargo fmt --check` clean
+- Cross-compile check if you touched platform code:
+  `cargo check --target x86_64-pc-windows-msvc`
+- If you changed a generated config, the matching test in `src/config_gen.rs` changed too
 - If you changed behaviour, update `LOGIC.md` in the same PR — that file is the
   reference for how the tool works, and every claim in it is tied to a test or a
   command you can run

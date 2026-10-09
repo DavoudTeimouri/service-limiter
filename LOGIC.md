@@ -3,9 +3,9 @@
 Authoritative description of **how the tool works and why**. Written before the Rust
 rewrite so both implementations share one reference.
 
-**Status**: describes the Python implementation at tag `v1.0.0`.
-The Rust rewrite must preserve every guarantee listed under
-[Compatibility contract](#compatibility-contract) — the test suite enforces them.
+**Status**: describes the Rust implementation (2.0.0). The previous Python
+implementation was 1.0.0; both are covered under
+[Compatibility contract](#9-compatibility-contract) and [MIGRATING.md](MIGRATING.md).
 
 Every claim here is verified by a named test or a runnable command. See
 [Keeping this file honest](#keeping-this-file-honest).
@@ -54,12 +54,18 @@ Steps 1–4 read only. Nothing writes to a system path until `apply`.
 
 ### 2.1 Platform dispatch
 
-`Orchestrator` branches on `PlatformDetector().detect()` at three call sites
-(`_discover_services`, `_profile_resources`, `_generate_configs`). Each does
-`if is_linux: import .linux … elif is_windows: import .windows …`.
+`cfg(target_os = "linux" | "windows")` gates the modules, and each is re-exported
+under the same name:
 
-Modules are imported **lazily inside the branch** so a Linux host never parses the
-Windows module. That is deliberate: `windows.py` is unverified on Linux and vice versa.
+```rust
+#[cfg(target_os = "linux")]
+pub use linux::{discover_services, main_pid, DEFAULT_INTERVAL};
+#[cfg(target_os = "windows")]
+pub use windows::{discover_services, main_pid, DEFAULT_INTERVAL};
+```
+
+Call sites read `platform::discover_services()` with no match and no `cfg` noise,
+and no trait is needed because there is only ever one implementation compiled.
 
 ### 2.2 Discovery
 
@@ -80,10 +86,10 @@ sshd.service loaded active running OpenSSH server daemon
 Lines without a `.service` suffix are skipped. This is load-bearing: systemctl emits the
 trailing `N loaded units listed.` summary even with `--no-legend`, and parsing it
 produced a bogus service named `2`.
-→ `test_trailing_summary_line_is_not_a_service`
+→ `platform::linux::tests::trailing_summary_line_is_not_a_service`
 
 When `systemctl` is missing, discovery returns `[]` and logs an error. It never invents a
-placeholder service. → `test_no_fabricated_services_without_systemd`
+placeholder service. (a missing `systemctl` is an `Err`, not a fabricated service)
 
 **Windows** — `Get-CimInstance Win32_Service` selecting `Name, DisplayName, State,
 StartMode, PathName, ProcessId, StartName`, `ConvertTo-Json -Compress`.
@@ -95,56 +101,75 @@ Windows profiler reaches the process without a second query.
 
 ### 2.3 Profiling — the measurement
 
-The only place real numbers are produced. Shared by both platforms
-(`windows.py` imports `_sample` from `linux.py`).
+The only place real numbers are produced. Shared by both platforms: `sysinfo`
+already abstracts `/proc` and the Windows process APIs, so
+`platform::sample_tree` in `src/platform/mod.rs` is the single implementation.
 
-```python
-def _sample(pid: int, interval: float) -> Optional[ResourceProfile]
+```rust
+pub fn sample_tree(root: u32, interval: Duration) -> Option<Sample>
 ```
 
-1. `psutil.Process(pid)` → `NoSuchProcess`/`AccessDenied` → return `None`.
-2. Collect `.children(recursive=True)` — a service's limits apply to its whole tree.
-3. Prime `cpu_percent(None)` on every process.
-4. `psutil.cpu_percent(None)`, then `sleep(interval)` (default **0.25 s**).
-5. Sum `cpu_percent()`, `memory_info().rss`, `io_counters()` read/write.
+1. `refresh_processes_specifics` to prime the process table.
+2. Sleep `interval` (default **250 ms**).
+3. Refresh again and diff.
 
-**Why prime first**: psutil returns a meaningless `0.0` on a process object's first
-`cpu_percent()` call, because it has no prior sample to diff against.
+**Why prime first**: `cpu_usage()` and `disk_usage()` are deltas between
+refreshes. The first call establishes the baseline; a single call returns
+garbage.
+
+3. Collect the process tree: build a `ppid -> children` map and walk it with an
+   **iterative** DFS. Iterative so a deep tree cannot blow the stack, and a
+   `seen` set guards against pid-reuse cycles. A service's limits apply to its
+   whole tree, not just the main process.
+4. Sum `cpu_usage()`, `memory()` (RSS), and `disk_usage()` read/written bytes.
 
 **Units**:
 
 | Metric | Unit |
 |---|---|
-| `cpu_percent` | summed percent across the tree; can exceed 100 on multi-core |
+| `cpu_percent` | summed percent across the tree; per-core, so it can exceed 100 on multi-core |
 | `memory_mb` | RSS bytes ÷ 1024² |
-| `io_read_kbps` | read_bytes ÷ 1024 ÷ interval |
-| `io_write_kbps` | write_bytes ÷ 1024 ÷ interval |
+| `io_read_kbps` | read bytes ÷ 1024 ÷ **measured elapsed seconds** |
+| `io_write_kbps` | write bytes ÷ 1024 ÷ **measured elapsed seconds** |
+
+I/O is divided by `Sample::elapsed_secs` — the window the sampler actually
+observed, not the requested `interval`. Dividing by the nominal value skews the
+rate whenever the process was descheduled.
 
 **Caveats** — honest limits of this method:
 - A single interval is a point sample, not a trend. Short-lived spikes are missed.
 - Children that spawn and exit inside the window are missed.
 - CPU percent is process-tree summed, not cgroup accounting, so it does not match
   `systemd-cgtop`.
-- Root-owned processes require elevation to sample.
+- Windows measures the service's main PID only; child processes are not walked,
+  so a Windows reading covers strictly less than the Linux reading for the same
+  service.
+- A process the sampler cannot stat is skipped. Root-owned services generally
+  need elevation.
+
+A service that cannot be measured is **skipped and reported**, never recorded as
+zero usage — zero would read as "well within policy", which is a different and
+wrong claim.
 
 ---
 
 ## 3. Policy semantics
 
-`policy_engine.py` holds one hardcoded default:
+`Policy::default()` in `src/models.rs`:
 
-```python
-{"name": "default", "cpu_percent": 80, "memory_mb": 512,
- "io_read_kbps": 1024, "io_write_kbps": 512}
+```rust
+Policy { name: "default", cpu_percent: 80.0, memory_mb: 512.0,
+         io_read_kbps: 1024.0, io_write_kbps: 512.0, io_device: None }
 ```
 
-`evaluate(profile, policy) -> (is_over, [violations])` applies **strict `>`** to all four
-keys. Exactly at the limit passes. → `test_limit_is_inclusive`
+`policy::evaluate(&profile, &policy) -> (bool, Vec<String>)` applies **strict `>`** to
+all four keys and reports every violation, not just the first. Exactly at the limit
+passes. → `policy::tests::limit_is_inclusive`
 
 Profiles are JSON overrides with the same four keys. A missing or malformed profile is a
 **hard error**, never a silent fallback to defaults: a limiter that quietly applies
 different limits than the operator asked for is worse than refusing to run.
-→ `test_missing_profile_is_fatal_not_silent`
+→ `profile::tests::missing_profile_is_an_error_not_a_fallback`
 
 ### 3.1 The CPU unit trap
 
@@ -161,7 +186,7 @@ Options, for whoever picks this up:
 - Rename the field to something explicit like `cpu_percent_single_core` and document 0–100 per core.
 
 A test asserts the current literal behaviour, so changing this **must** update
-`test_memory_and_cpu_directives`.
+`config_gen::tests::memory_and_cpu_directives`.
 
 ---
 
@@ -194,14 +219,14 @@ IOWriteBandwidthMax=/dev/sda1 262144
 **I/O limits are skipped unless the policy has `io_device`.** systemd requires a
 block-device path per limit. Without one the generator logs a warning and omits the
 directives rather than emitting something systemd ignores.
-→ `test_io_skipped_with_warning_when_no_device`
+→ `config_gen::tests::io_skipped_with_warning_when_no_device`
 
 > **Silent no-op, fixed.** The earlier code emitted `ReadBandwidthMax=` and
 > `WriteBandwidthMax=`. Those are **not** systemd keys. `systemd-analyze verify` reports
 > `Unknown key 'ReadBandwidthMax' in section [Service], ignoring.` — `daemon-reload`
 > succeeded, the service restarted, and **no I/O limit was ever applied**. Verified
 > against systemd 257 by diffing old vs new output.
-> → `test_io_directives_are_the_real_systemd_names`, `test_bogus_legacy_io_directives_are_absent`
+> → `config_gen::tests::io_directives_use_real_systemd_names`, `config_gen::tests::bogus_legacy_io_directives_are_absent`
 
 ### 4.2 Windows — Job Object script
 
@@ -227,7 +252,7 @@ read/write transfer caps via `IoInfo`. Service PID resolved with
 > script's own `catch` blocks converted each failure into `Write-Warning`, so it
 > *looked* successful while creating nothing.
 > (`Get-Job` exists but is an unrelated PowerShell background job.)
-> → `test_no_invented_cmdlets`, `test_uses_real_win32_api`
+> → `config_gen::tests::windows_script_has_no_invented_cmdlets`, `config_gen::tests::windows_memory_flag_is_the_real_one`
 
 **Known weak enforcement — unresolved.** A Job Object limit **lapses when its handle is
 released**, and the script exits. The generated script says so itself. Also, if the
@@ -322,34 +347,31 @@ from a wheel, a venv, or a source checkout.
 
 | Module | Responsibility |
 |---|---|
-| `cli/main.py` | argparse, subcommands, exit codes, audit, apply gates |
-| `orchestrator.py` | pipeline, profile loading, config **text** generation |
-| `policy_engine.py` | thresholds and `evaluate()` |
-| `platform/detector.py` | OS + arch |
-| `platform/linux.py` | systemctl discovery, `_sample()`, profiling |
-| `platform/windows.py` | CIM discovery, profiling (reuses `_sample`) |
-| `models/` | `ServiceDescriptor`, `ResourceProfile`, `SharedState` |
-| `tui.py` | curses UI, Linux only |
+| `main.rs` | clap CLI, subcommands, exit codes |
+| `orchestrator.rs` | the pipeline; builds configs for services over policy |
+| `policy.rs` | thresholds and `evaluate()` |
+| `config_gen.rs` | systemd drop-in + Windows script text |
+| `apply.rs` | privileged install path, validation, backup, confirmation |
+| `platform/mod.rs` | `cfg` dispatch and the shared process-tree sampler |
+| `platform/linux.rs` | systemctl discovery, MainPID, output parser |
+| `platform/windows.rs` | CIM discovery, PowerShell shell detection |
+| `models.rs` | `ServiceDescriptor`, `ResourceProfile`, `Policy` |
+| `profile.rs` | bundled profiles, compiled in via `include_str!` |
+| `job_limits.ps1` | the Windows script template, shared verbatim with 1.x |
 
-**Platform discovery, profiling, and config generation all live in `orchestrator.py`.**
-`config_generator.py` was a byte-identical duplicate with a `SyntaxWarning`; deleted.
+**Platform dispatch is `cfg`, not traits.** One implementation is compiled per
+target, so a trait would add dispatch with no polymorphism to choose between.
 
-`SharedState` is a mutable bag threaded through the pipeline whose only consumer is
-`to_dict()`. A dataclass or plain return value would do.
-
----
+**The Windows script template is a real file**, `src/job_limits.ps1`, embedded
+with `include_str!`. It was byte-identical to what Python generated, so it is
+shared rather than duplicated, and the two implementations cannot drift on the
+Win32 flag values.
 
 ## 8. TUI
 
-curses, Linux only. Menu: Analyze Services / View Service Profiles / Apply Limits
-(placeholder) / Quit. Services are paired to profiles **by name**.
-
-> **Index-pairing bug, fixed.** The TUI zipped `services[i]` with `profiles[i]` by
-> position. When any profile was missing, every subsequent row showed **the wrong
-> service's numbers under the right name**. Profiles are now looked up by
-> `service_name`.
-
----
+Removed in 2.0.0. The curses TUI was Linux-only, read-only, and displayed the
+same data `analyze` already prints. Porting it to ratatui would have cost two
+dependencies and ~200 lines to reproduce existing output.
 
 ## 9. Compatibility contract
 
@@ -375,45 +397,50 @@ belonging in `2.0.0` with a CHANGELOG entry.
 6. A missing profile is fatal, not a fallback.
 7. Zero measurable services exits `2`.
 
-**Deliberately changed**: install method (`pip` → `cargo install` / prebuilt binary).
-TUI stays curses-based unless there is a reason not to.
+**Deliberately changed in 2.0.0**: install method (`pip` → `cargo install` /
+release binary), TUI removed, `--durable` not yet implemented, audit log not yet
+implemented. See [MIGRATING.md](MIGRATING.md).
 
 ---
 
 ## 10. Keeping this file honest
 
-| Claim | Check |
+| Claim | Test |
 |---|---|
-| systemd directives correct | `test_io_directives_are_the_real_systemd_names` |
-| legacy directives gone | `test_bogus_legacy_io_directives_are_absent` |
-| summary line not a service | `test_trailing_summary_line_is_not_a_service` |
-| no fabricated services | `test_no_fabricated_services_without_systemd` |
-| CPU/memory text | `test_memory_and_cpu_directives` |
-| drop-in path | `test_drop_in_path_is_service_dot_service_d` |
-| no invented cmdlets | `test_no_invented_cmdlets` |
-| real Win32 APIs used | `test_uses_real_win32_api` |
-| Windows filename matches apply | `test_filename_matches_what_apply_expects` |
-| profiler returns a map | `test_profile_resources_always_returns_a_dict` |
-| policy boundaries | `test_limit_is_inclusive`, `test_over_limit_reports_each_resource` |
-| profiles load from package | `test_bundled_profile_loads` |
-| missing profile fatal | `test_missing_profile_is_fatal_not_silent` |
+| systemd directives correct | `config_gen::tests::io_directives_use_real_systemd_names` |
+| legacy directives gone | `config_gen::tests::bogus_legacy_io_directives_are_absent` |
+| summary line not a service | `platform::linux::tests::trailing_summary_line_is_not_a_service` |
+| CPU/memory text | `config_gen::tests::memory_and_cpu_directives` |
+| drop-in path | `config_gen::tests::drop_in_path_is_service_dot_service_d` |
+| I/O skipped without a device | `config_gen::tests::io_skipped_with_warning_when_no_device` |
+| no invented cmdlets | `config_gen::tests::windows_script_has_no_invented_cmdlets` |
+| real Win32 classes used | `config_gen::tests::windows_script_uses_real_win32_classes` |
+| Windows memory flag is 0x200 | `config_gen::tests::windows_memory_flag_is_the_real_one` |
+| IO_COUNTERS never written | `config_gen::tests::windows_io_limits_never_go_into_io_counters` |
+| CPU rate applied and clamped | `config_gen::tests::windows_cpu_rate_is_applied_and_clamped` |
+| profiler returns a map | enforced by the type system; no test needed |
+| policy boundaries | `policy::tests::{limit_is_inclusive, over_limit_reports_every_resource}` |
+| profiles load from the binary | `profile::tests::bundled_profile_loads` |
+| missing profile is fatal | `profile::tests::missing_profile_is_an_error_not_a_fallback` |
+| measurement returns real data | `platform::linux::tests::samples_this_process_with_real_usage` |
+| exit codes | `tests/cli.rs` |
+| dry-run changes nothing | `tests/cli.rs::apply_dry_run_touches_nothing` |
+| invalid drop-in is refused | `tests/cli.rs::apply_rejects_a_config_systemd_would_ignore` |
 
 Run them:
 
 ```bash
-python3 -m unittest discover -s tests -v
+cargo test
 ```
 
 Claims **not** covered by a test, and how to verify by hand:
 
 | Claim | Verify |
 |---|---|
-| systemd accepts the drop-in | `systemd-analyze verify <unit>` — must print no `Unknown key` |
+| systemd accepts the drop-in | `systemd-analyze verify <unit>` must print no `Unknown key` |
 | Windows script runs | elevated PowerShell on a real Windows host |
+| Windows limits actually bind | `QueryInformationJobObject` readback on a real host |
 | CPU sampling is accurate | compare `analyze` against `systemd-cgtop` / Task Manager |
-| Job Object limits actually bind | needs a Windows host; see the §4.2 weak-enforcement note |
-
----
 
 ## 11. Known open problems
 
@@ -424,6 +451,6 @@ Claims **not** covered by a test, and how to verify by hand:
 | 3 | I/O limits need a device path, so profiles without `io_device` get none | I/O silently unenforced | §4.1 |
 | 4 | Single-interval sampling | misses short spikes | §2.3 |
 | 5 | No `revert` / `status` command | `apply` is a one-way door | backups exist but must be restored by hand |
-| 6 | Windows path unverified on a real host | discovery + Job Object untested | needs a Windows runner |
+| 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host | needs a Windows runner |
 | 7 | `profiles/` duplicated at repo root | redundant file | §6 |
-| 8 | TUI "Apply Limits" is a placeholder | menu entry promises a feature that does nothing | |
+| 8 | `--durable` and the audit log are not in the Rust build yet | Windows limits lapse; no local record of applies | MIGRATING.md |

@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-555)
 
-Python 3.8+, single dependency (`psutil`).
+Rust, single static binary, no runtime dependencies.
 
 For how the tool works and the domain traps it has to respect, read
 **[LOGIC.md](LOGIC.md)**.
@@ -40,8 +40,26 @@ cgroups, or install software.
 
 ## Install
 
+Prebuilt binaries are attached to each
+[release](https://github.com/DavoudTeimouri/service-limiter/releases):
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `service-limiter-linux-x86_64.tar.gz` |
+| Linux aarch64 | `service-limiter-linux-aarch64.tar.gz` |
+| Windows x86_64 | `service-limiter-windows-x86_64.zip` |
+
+Verify before installing - every asset ships a `.sha256`:
+
 ```bash
-pip install service-limiter
+sha256sum -c service-limiter-linux-x86_64.tar.gz.sha256
+sudo tar -xzf service-limiter-linux-x86_64.tar.gz -C /usr/local/bin
+```
+
+Or install with cargo:
+
+```bash
+cargo install --git https://github.com/DavoudTeimouri/service-limiter.git
 ```
 
 From source:
@@ -49,15 +67,10 @@ From source:
 ```bash
 git clone https://github.com/DavoudTeimouri/service-limiter.git
 cd service-limiter
-pip install -e .
+cargo build --release
 ```
 
-Portable build (no Python needed on the target machine):
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile --name service-limiter --add-data "profiles;profiles" service_limiter/cli/main.py
-```
+**Coming from the Python 1.x CLI?** See [MIGRATING.md](MIGRATING.md).
 
 ---
 
@@ -91,7 +104,6 @@ On Windows, run an **elevated** terminal instead of using `sudo`.
 | Memory limit | `MemoryMax` | Job Object `JOB_OBJECT_LIMIT_JOB_MEMORY` |
 | I/O limit | `IOReadBandwidthMax`, only when the profile has `io_device` | Job Object I/O rate control |
 | Durable | **Yes**, systemd owns the drop-in | **No by default**, see below |
-| TUI | yes | no |
 | macOS / BSD | unsupported | unsupported |
 
 **Windows limits are not durable by default.** A Job Object's limits live only while a
@@ -143,11 +155,6 @@ Installs staged configs.
 On Linux, in order: verify the drop-in with `systemd-analyze verify` (**before**
 touching `/etc`), back up any existing `override.conf` to `.bak`, then
 `daemon-reload` + `restart`.
-
-### `service-limiter tui`
-
-Linux only. Browse services and their measured usage. Read-only, it does not apply
-limits.
 
 ---
 
