@@ -59,6 +59,8 @@ def main():
     apply_parser.add_argument('--config', required=True, help='Config directory (output from generate)')
     apply_parser.add_argument('--dry-run', action='store_true', help='Only show what would be done')
     apply_parser.add_argument('--yes', action='store_true', help='Skip the confirmation prompt')
+    apply_parser.add_argument('--durable', action='store_true',
+                               help='Windows only: hold the Job Object handle open so limits persist')
 
     # TUI command (Linux only)
     tui_parser = subparsers.add_parser('tui', help='Launch TUI (Linux only)')
@@ -89,7 +91,7 @@ def main():
         configs = result.get('configs', {})
         if not configs:
             print("No configs generated: no service exceeded the policy.")
-            sys.exit(1)
+            sys.exit(EXIT_OK)
         # Stage configs as <output>/<service>/<file>, which is exactly the layout
         # apply_linux/apply_windows scan. Previously --output was accepted and ignored.
         for name, cfg in configs.items():
@@ -104,11 +106,11 @@ def main():
         audit("generate", output=args.output, count=len(configs))
         sys.exit(EXIT_OK)
     elif args.command == 'apply':
-        apply_configs(args.config, args.dry_run, args.yes)
+        apply_configs(args.config, args.dry_run, args.yes, args.durable)
     elif args.command == 'tui':
         if platform.system() != 'Linux':
             logger.error("TUI is only available on Linux")
-            return
+            sys.exit(EXIT_ERROR)
         # Import and run the TUI
         try:
             from ..tui import main as tui_main
@@ -122,7 +124,7 @@ def main():
     else:
         parser.print_help()
 
-def apply_configs(config_dir, dry_run=False, assume_yes=False):
+def apply_configs(config_dir, dry_run=False, assume_yes=False, durable=False):
     """Apply the generated configurations in config_dir."""
     if not os.path.isdir(config_dir):
         logger.error(f"Config directory {config_dir} does not exist. Run 'generate' first.")
@@ -136,7 +138,7 @@ def apply_configs(config_dir, dry_run=False, assume_yes=False):
             sys.exit(EXIT_NEEDS_ROOT)
         ok = apply_linux(config_dir, dry_run, assume_yes)
     elif system == 'Windows':
-        ok = apply_windows(config_dir, dry_run, assume_yes)
+        ok = apply_windows(config_dir, dry_run, assume_yes, durable)
     else:
         logger.error(f"Unsupported platform: {system}")
         ok = False
@@ -213,7 +215,7 @@ def apply_linux(config_dir, dry_run, assume_yes=False):
 
     return all_ok
 
-def apply_windows(config_dir, dry_run, assume_yes=False):
+def apply_windows(config_dir, dry_run, assume_yes=False, durable=False):
     """Apply Windows Job Object configs via the generated PowerShell script."""
     all_ok = True
     for item in sorted(os.listdir(config_dir)):
@@ -240,12 +242,25 @@ def apply_windows(config_dir, dry_run, assume_yes=False):
         from ..platform.windows import _powershell
         try:
             shell = _powershell()
-            result = subprocess.run(
-                [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script],
-                capture_output=True, text=True, check=True)
-            logger.info(result.stdout.strip() or f"Applied limits to {service_name}")
-            if result.stderr.strip():
-                logger.warning(result.stderr.strip())
+            if durable:
+                # Job Object limits lapse when the last handle closes. Keep a
+                # process alive holding it; without this the limits vanish the
+                # moment the one-shot script exits.
+                cmd = [shell, "-NoProfile", "-Command",
+                       f"& '{ps_script}'; while ($true) {{ Start-Sleep -Seconds 3600 }}"]
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True)
+                logger.info(f"Holding Job Object for {service_name} in pid {proc.pid}; "
+                            "stop it to release the limits")
+            else:
+                result = subprocess.run(
+                    [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script],
+                    capture_output=True, text=True, check=True)
+                logger.info(result.stdout.strip() or f"Applied limits to {service_name}")
+                if result.stderr.strip():
+                    logger.warning(result.stderr.strip())
+                logger.warning(f"Limits for {service_name} lapse when the script exits. "
+                               "Use --durable to keep them.")
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to apply config for {service_name}: {e}")
             all_ok = False
