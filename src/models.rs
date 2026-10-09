@@ -38,6 +38,9 @@ pub struct ResourceProfile {
 /// Thresholds a profile is judged against.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Policy {
+    /// Not part of the profile file: set from the file name on load, so an
+    /// existing 4-key profile stays valid.
+    #[serde(default)]
     pub name: String,
     pub cpu_percent: f32,
     pub memory_mb: f64,

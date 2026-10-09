@@ -7,6 +7,7 @@
 use crate::models::{Policy, ServiceDescriptor};
 
 /// Where a generated config goes, and its content.
+#[derive(Debug, Clone)]
 pub struct GeneratedConfig {
     pub content: String,
     pub file_path: String,
@@ -21,10 +22,11 @@ pub struct GeneratedConfig {
 /// device path; without `policy.io_device` they are omitted rather than emitted
 /// as something systemd ignores.
 pub fn generate_linux_config(service: &ServiceDescriptor, policy: &Policy) -> GeneratedConfig {
-    let mut content = format!(
-        "[Service]\nCPUQuota={}%\nMemoryMax={}M\n",
-        policy.cpu_percent as u32, policy.memory_mb as u64
-    );
+    // Truncating a sub-1 limit to 0 would emit CPUQuota=0%, which systemd reads
+    // as "never run", so clamp rather than round down to nothing.
+    let cpu = (policy.cpu_percent as u32).max(1);
+    let mem = (policy.memory_mb as u64).max(1);
+    let mut content = format!("[Service]\nCPUQuota={cpu}%\nMemoryMax={mem}M\n");
 
     let mut warnings = Vec::new();
     match policy.io_device.as_deref().filter(|d| !d.is_empty()) {
