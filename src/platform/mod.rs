@@ -19,4 +19,7 @@ pub struct Sample {
     pub rss_bytes: u64,
     pub read_bytes: u64,
     pub write_bytes: u64,
+    /// Seconds the sample window actually took, which may differ from the
+    /// requested interval. Callers divide by this, not the nominal value.
+    pub elapsed_secs: f64,
 }

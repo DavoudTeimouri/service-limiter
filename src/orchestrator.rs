@@ -62,7 +62,7 @@ fn profile_services(services: &[ServiceDescriptor]) -> BTreeMap<String, Resource
             eprintln!("skipping {}: could not sample pid {pid}", svc.name);
             continue;
         };
-        let secs = crate::platform::DEFAULT_INTERVAL.as_secs_f64();
+        let secs = sample.elapsed_secs;
         out.insert(
             svc.name.clone(),
             ResourceProfile {

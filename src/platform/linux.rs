@@ -82,8 +82,7 @@ pub fn sample_tree(root: u32, interval: Duration) -> Option<Sample> {
         return None;
     }
 
-    let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
-    let mut sample = Sample::default();
+    let mut sample = Sample { elapsed_secs: started.elapsed().as_secs_f64().max(f64::EPSILON), ..Default::default() };
     for pid in tree {
         if let Some(p) = sys.process(pid) {
             sample.cpu_percent += p.cpu_usage();

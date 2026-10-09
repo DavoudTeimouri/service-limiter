@@ -10,7 +10,11 @@ use crate::models::{Policy, ServiceDescriptor};
 #[derive(Debug, Clone)]
 pub struct GeneratedConfig {
     pub content: String,
+    /// Final on-system destination. Kept for callers that report it; apply
+    /// recomputes paths per OS because it also needs the drop-in directory.
+    #[allow(dead_code)]
     pub file_path: String,
+    #[allow(dead_code)]
     pub directory: String,
     /// Human-readable notes for the operator (e.g. skipped I/O limits).
     pub warnings: Vec<String>,

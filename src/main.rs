@@ -2,6 +2,7 @@
 //!
 //! See LOGIC.md for how this works and the platform traps it respects.
 
+mod apply;
 mod config_gen;
 mod models;
 mod orchestrator;
@@ -69,9 +70,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Analyze { profile } => analyze(profile.as_deref()),
         Command::Generate { profile, output } => generate(&profile, &output),
-        Command::Apply { config, dry_run, yes, durable } => {
-            apply(&config, dry_run, yes, durable)
-        }
+        Command::Apply { config, dry_run, yes, durable } => apply(&config, dry_run, yes, durable),
     };
     ExitCode::from(result)
 }
@@ -170,6 +169,9 @@ fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
 }
 
 fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u8 {
+    if durable {
+        eprintln!("warning: --durable is not yet implemented in the Rust port; limits will lapse.");
+    }
     if !config.is_dir() {
         eprintln!("error: config directory {} does not exist. Run 'generate' first.", config.display());
         return exit::ERROR;
@@ -181,7 +183,21 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
         return exit::NEEDS_ROOT;
     }
 
-    let _ = (yes, durable); // apply is implemented in the next migration step
-    eprintln!("error: apply is not implemented in the Rust port yet; use the Python 1.x build.");
-    exit::ERROR
+    match apply::run(config, dry_run, yes) {
+        Ok(outcome) => {
+            println!(
+                "applied {}, skipped {}, failed {}",
+                outcome.applied, outcome.skipped, outcome.failed
+            );
+            if outcome.is_ok() {
+                exit::OK
+            } else {
+                exit::ERROR
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            exit::ERROR
+        }
+    }
 }
