@@ -3,9 +3,7 @@
 use crate::models::Policy;
 
 /// Profiles shipped with the tool.
-pub const BUNDLED: &[(&str, &str)] = &[
-    ("web-server", include_str!("../profiles/web-server.json")),
-];
+pub const BUNDLED: &[(&str, &str)] = &[("web-server", include_str!("../profiles/web-server.json"))];
 
 /// Names of the bundled profiles.
 pub fn available() -> Vec<&'static str> {
@@ -29,8 +27,8 @@ pub fn load(name: &str) -> Result<Policy, String> {
             )
         })?;
 
-    let mut policy: Policy = serde_json::from_str(raw)
-        .map_err(|e| format!("Invalid JSON in profile '{name}': {e}"))?;
+    let mut policy: Policy =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid JSON in profile '{name}': {e}"))?;
     policy.name = name.to_string();
     Ok(policy)
 }
@@ -50,7 +48,10 @@ mod tests {
     fn missing_profile_is_an_error_not_a_fallback() {
         let err = load("does-not-exist").unwrap_err();
         assert!(err.contains("not found"), "{err}");
-        assert!(err.contains("web-server"), "error should list what exists: {err}");
+        assert!(
+            err.contains("web-server"),
+            "error should list what exists: {err}"
+        );
     }
 
     #[test]

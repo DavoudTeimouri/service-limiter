@@ -24,7 +24,8 @@ mod exit {
     pub const VIOLATION: u8 = 1;
     /// Runtime/environment failure, including "nothing was measurable".
     pub const ERROR: u8 = 2;
-    /// `apply` needs root.
+    /// `apply` needs root (Linux only; Windows has no geteuid).
+    #[allow(dead_code)]
     pub const NEEDS_ROOT: u8 = 3;
 }
 
@@ -70,7 +71,12 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Analyze { profile } => analyze(profile.as_deref()),
         Command::Generate { profile, output } => generate(&profile, &output),
-        Command::Apply { config, dry_run, yes, durable } => apply(&config, dry_run, yes, durable),
+        Command::Apply {
+            config,
+            dry_run,
+            yes,
+            durable,
+        } => apply(&config, dry_run, yes, durable),
     };
     ExitCode::from(result)
 }
@@ -164,7 +170,11 @@ fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
         }
         println!("Wrote {}", path.display());
     }
-    println!("Generated {} configs in {}", result.configs.len(), output.display());
+    println!(
+        "Generated {} configs in {}",
+        result.configs.len(),
+        output.display()
+    );
     exit::OK
 }
 
@@ -173,7 +183,10 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
         eprintln!("warning: --durable is not yet implemented in the Rust port; limits will lapse.");
     }
     if !config.is_dir() {
-        eprintln!("error: config directory {} does not exist. Run 'generate' first.", config.display());
+        eprintln!(
+            "error: config directory {} does not exist. Run 'generate' first.",
+            config.display()
+        );
         return exit::ERROR;
     }
 

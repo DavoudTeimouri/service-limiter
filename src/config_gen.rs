@@ -84,10 +84,7 @@ pub fn generate_windows_config(service: &ServiceDescriptor, policy: &Policy) -> 
 
     GeneratedConfig {
         content,
-        file_path: format!(
-            "C:\\ServiceLimiter\\{}\\Set-JobLimits.ps1",
-            service.name
-        ),
+        file_path: format!("C:\\ServiceLimiter\\{}\\Set-JobLimits.ps1", service.name),
         directory: "C:\\ServiceLimiter".to_string(),
         warnings: Vec::new(),
     }
@@ -98,8 +95,14 @@ mod tests {
     use super::*;
 
     fn policy() -> Policy {
-        Policy { name: "t".into(), cpu_percent: 50.0, memory_mb: 256.0,
-                 io_read_kbps: 512.0, io_write_kbps: 256.0, io_device: None }
+        Policy {
+            name: "t".into(),
+            cpu_percent: 50.0,
+            memory_mb: 256.0,
+            io_read_kbps: 512.0,
+            io_write_kbps: 256.0,
+            io_device: None,
+        }
     }
 
     #[test]
@@ -111,7 +114,10 @@ mod tests {
 
     #[test]
     fn io_directives_use_real_systemd_names() {
-        let p = Policy { io_device: Some("/dev/sda1".into()), ..policy() };
+        let p = Policy {
+            io_device: Some("/dev/sda1".into()),
+            ..policy()
+        };
         let c = generate_linux_config(&ServiceDescriptor::new("sshd"), &p).content;
         assert!(c.contains("IOReadBandwidthMax=/dev/sda1 524288"), "{c}");
         assert!(c.contains("IOWriteBandwidthMax=/dev/sda1 262144"), "{c}");
@@ -122,7 +128,10 @@ mod tests {
     fn bogus_legacy_io_directives_are_absent() {
         // `ReadBandwidthMax` is a substring of `IOReadBandwidthMax`, so the
         // newline anchor is what makes this assertion meaningful.
-        let p = Policy { io_device: Some("/dev/sda1".into()), ..policy() };
+        let p = Policy {
+            io_device: Some("/dev/sda1".into()),
+            ..policy()
+        };
         let c = generate_linux_config(&ServiceDescriptor::new("sshd"), &p).content;
         assert!(!c.contains("\nReadBandwidthMax="), "{c}");
         assert!(!c.contains("\nWriteBandwidthMax="), "{c}");
@@ -131,21 +140,37 @@ mod tests {
     #[test]
     fn io_skipped_with_warning_when_no_device() {
         let cfg = generate_linux_config(&ServiceDescriptor::new("sshd"), &policy());
-        assert!(!cfg.content.contains("IOReadBandwidthMax"), "{}", cfg.content);
-        assert!(cfg.warnings.iter().any(|w| w.contains("io_device")), "{:?}", cfg.warnings);
+        assert!(
+            !cfg.content.contains("IOReadBandwidthMax"),
+            "{}",
+            cfg.content
+        );
+        assert!(
+            cfg.warnings.iter().any(|w| w.contains("io_device")),
+            "{:?}",
+            cfg.warnings
+        );
     }
 
     #[test]
     fn drop_in_path_is_service_dot_service_d() {
         let cfg = generate_linux_config(&ServiceDescriptor::new("sshd"), &policy());
-        assert_eq!(cfg.file_path, "/etc/systemd/system/sshd.service.d/override.conf");
+        assert_eq!(
+            cfg.file_path,
+            "/etc/systemd/system/sshd.service.d/override.conf"
+        );
     }
 
     #[test]
     fn windows_script_has_no_invented_cmdlets() {
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
-        for fake in ["New-JobObject", "Set-JobObject", "Get-JobObject",
-                     "Remove-JobObject", "Get-WmiObject"] {
+        for fake in [
+            "New-JobObject",
+            "Set-JobObject",
+            "Get-JobObject",
+            "Remove-JobObject",
+            "Get-WmiObject",
+        ] {
             assert!(!s.contains(fake), "invented cmdlet {fake} present");
         }
     }
@@ -153,8 +178,12 @@ mod tests {
     #[test]
     fn windows_script_uses_real_win32_classes() {
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
-        for api in ["CreateJobObject", "SetInformationJobObject",
-                    "AssignProcessToJobObject", "Add-Type"] {
+        for api in [
+            "CreateJobObject",
+            "SetInformationJobObject",
+            "AssignProcessToJobObject",
+            "Add-Type",
+        ] {
             assert!(s.contains(api), "missing {api}");
         }
     }
@@ -166,7 +195,10 @@ mod tests {
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
         assert!(s.contains("0x00000200"), "JOB_MEMORY flag missing");
         assert!(!s.contains("0x00000020"), "PRIORITY_CLASS flag present");
-        assert!(!s.contains("0x00000400"), "DIE_ON_UNHANDLED_EXCEPTION flag present");
+        assert!(
+            !s.contains("0x00000400"),
+            "DIE_ON_UNHANDLED_EXCEPTION flag present"
+        );
     }
 
     #[test]
@@ -180,9 +212,15 @@ mod tests {
     #[test]
     fn windows_cpu_rate_is_applied_and_clamped() {
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
-        assert!(s.contains("$cpu.CpuRate = 5000"), "50% * 100 not interpolated");
+        assert!(
+            s.contains("$cpu.CpuRate = 5000"),
+            "50% * 100 not interpolated"
+        );
 
-        let over = Policy { cpu_percent: 250.0, ..policy() };
+        let over = Policy {
+            cpu_percent: 250.0,
+            ..policy()
+        };
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &over).content;
         assert!(s.contains("$cpu.CpuRate = 10000"), "cpu rate not clamped");
     }
@@ -190,6 +228,10 @@ mod tests {
     #[test]
     fn windows_filename_matches_what_apply_expects() {
         let cfg = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy());
-        assert!(cfg.file_path.ends_with("Set-JobLimits.ps1"), "{}", cfg.file_path);
+        assert!(
+            cfg.file_path.ends_with("Set-JobLimits.ps1"),
+            "{}",
+            cfg.file_path
+        );
     }
 }

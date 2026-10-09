@@ -18,7 +18,11 @@ pub struct Analysis {
 pub fn run(policy: &Policy) -> Result<Analysis, String> {
     let services = crate::platform::discover_services()?;
     let profiles = profile_services(&services);
-    let mut result = Analysis { services, profiles, ..Default::default() };
+    let mut result = Analysis {
+        services,
+        profiles,
+        ..Default::default()
+    };
 
     for svc in &result.services {
         let Some(measured) = result.profiles.get(&svc.name) else {

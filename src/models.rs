@@ -20,7 +20,11 @@ impl ServiceDescriptor {
     /// plain `#[derive(Default)]`.
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
-        Self { display_name: name.clone(), name, ..Default::default() }
+        Self {
+            display_name: name.clone(),
+            name,
+            ..Default::default()
+        }
     }
 }
 

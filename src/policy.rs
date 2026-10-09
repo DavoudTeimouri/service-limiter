@@ -42,14 +42,25 @@ mod tests {
     use super::*;
 
     fn policy() -> Policy {
-        Policy { name: "t".into(), cpu_percent: 50.0, memory_mb: 256.0,
-                 io_read_kbps: 512.0, io_write_kbps: 256.0, io_device: None }
+        Policy {
+            name: "t".into(),
+            cpu_percent: 50.0,
+            memory_mb: 256.0,
+            io_read_kbps: 512.0,
+            io_write_kbps: 256.0,
+            io_device: None,
+        }
     }
 
     #[test]
     fn under_limit_is_not_a_violation() {
-        let p = ResourceProfile { cpu_percent: 10.0, memory_mb: 20.0,
-                                  io_read_kbps: 5.0, io_write_kbps: 5.0, ..Default::default() };
+        let p = ResourceProfile {
+            cpu_percent: 10.0,
+            memory_mb: 20.0,
+            io_read_kbps: 5.0,
+            io_write_kbps: 5.0,
+            ..Default::default()
+        };
         let (over, v) = evaluate(&p, &policy());
         assert!(!over);
         assert!(v.is_empty());
@@ -57,8 +68,13 @@ mod tests {
 
     #[test]
     fn over_limit_reports_every_resource() {
-        let p = ResourceProfile { cpu_percent: 99.0, memory_mb: 999.0,
-                                  io_read_kbps: 5000.0, io_write_kbps: 5000.0, ..Default::default() };
+        let p = ResourceProfile {
+            cpu_percent: 99.0,
+            memory_mb: 999.0,
+            io_read_kbps: 5000.0,
+            io_write_kbps: 5000.0,
+            ..Default::default()
+        };
         let (over, v) = evaluate(&p, &policy());
         assert!(over);
         assert_eq!(v.len(), 4);
@@ -66,8 +82,13 @@ mod tests {
 
     #[test]
     fn limit_is_inclusive() {
-        let p = ResourceProfile { cpu_percent: 50.0, memory_mb: 256.0,
-                                  io_read_kbps: 512.0, io_write_kbps: 256.0, ..Default::default() };
+        let p = ResourceProfile {
+            cpu_percent: 50.0,
+            memory_mb: 256.0,
+            io_read_kbps: 512.0,
+            io_write_kbps: 256.0,
+            ..Default::default()
+        };
         assert!(!evaluate(&p, &policy()).0);
     }
 }

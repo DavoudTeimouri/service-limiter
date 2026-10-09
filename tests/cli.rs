@@ -8,7 +8,10 @@ fn bin() -> &'static str {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(bin()).args(args).output().expect("binary runs")
+    Command::new(bin())
+        .args(args)
+        .output()
+        .expect("binary runs")
 }
 
 fn code(out: &std::process::Output) -> i32 {
@@ -19,12 +22,23 @@ fn code(out: &std::process::Output) -> i32 {
 #[test]
 fn missing_config_dir_is_error_not_ok() {
     let out = run(&["apply", "--config", "/nonexistent/path/xyz"]);
-    assert_eq!(code(&out), 2, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
 fn unknown_profile_lists_available_ones() {
-    let out = run(&["generate", "--profile", "no-such-profile", "--output", "/tmp/x"]);
+    let out = run(&[
+        "generate",
+        "--profile",
+        "no-such-profile",
+        "--output",
+        "/tmp/x",
+    ]);
     assert_eq!(code(&out), 2);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("web-server"), "should list what exists: {err}");
@@ -48,8 +62,18 @@ fn apply_dry_run_touches_nothing() {
     )
     .unwrap();
 
-    let out = run(&["apply", "--config", dir.path().to_str().unwrap(), "--dry-run"]);
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&[
+        "apply",
+        "--config",
+        dir.path().to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("DRY-RUN"));
     // The staged tree must be unchanged; nothing may be written to /etc.
     assert!(svc.join("override.conf").exists());

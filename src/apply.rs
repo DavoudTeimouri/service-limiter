@@ -2,7 +2,10 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
@@ -51,7 +54,10 @@ pub fn run(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Resul
         let staged = service_dir.join(filename);
 
         if !staged.is_file() {
-            eprintln!("warning: no {filename} for {service} in {}", service_dir.display());
+            eprintln!(
+                "warning: no {filename} for {service} in {}",
+                service_dir.display()
+            );
             out.failed += 1;
             continue;
         }
@@ -96,9 +102,9 @@ fn confirm(service: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
-    let drop_in_dir: PathBuf =
-        PathBuf::from(format!("/etc/systemd/system/{service}.service.d"));
+    let drop_in_dir: PathBuf = PathBuf::from(format!("/etc/systemd/system/{service}.service.d"));
     let target = drop_in_dir.join("override.conf");
 
     let content = fs::read_to_string(staged)?;
@@ -120,18 +126,24 @@ fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
     if target.exists() {
         // Back up so apply is reversible; there is no revert command yet.
         fs::copy(&target, target.with_extension("conf.bak"))?;
-        println!("backed up existing config to {}", target.with_extension("conf.bak").display());
+        println!(
+            "backed up existing config to {}",
+            target.with_extension("conf.bak").display()
+        );
     }
     fs::write(&target, &content)?;
     println!("installed {}", target.display());
 
     Command::new("systemctl").args(["daemon-reload"]).status()?;
-    Command::new("systemctl").args(["restart", service]).status()?;
+    Command::new("systemctl")
+        .args(["restart", service])
+        .status()?;
     println!("restarted {service}");
     Ok(true)
 }
 
 /// Ask systemd whether it understands every line, by verifying a probe unit.
+#[cfg(target_os = "linux")]
 ///
 /// Returns the problems systemd complained about, or Ok(()) when clean.
 fn verify_with_systemd_analyze(content: &str) -> Result<(), Vec<String>> {
@@ -167,7 +179,15 @@ fn install_windows(service: &str, staged: &Path) -> std::io::Result<bool> {
     // Prefer pwsh (PowerShell 7+); fall back to the deprecated 5.1 host.
     let shell = ["pwsh", "powershell"]
         .into_iter()
-        .find(|s| Command::new(s).arg("-NoProfile").arg("-Command").arg("$PSVersionTable").stdout(Stdio::null()).status().is_ok())
+        .find(|s| {
+            Command::new(s)
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("$PSVersionTable")
+                .stdout(Stdio::null())
+                .status()
+                .is_ok()
+        })
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no PowerShell found"))?;
 
     let out = Command::new(shell)
@@ -180,7 +200,9 @@ fn install_windows(service: &str, staged: &Path) -> std::io::Result<bool> {
         ));
     }
     println!("{}", String::from_utf8_lossy(&out.stdout).trim());
-    eprintln!("warning: Job Object limits lapse when the script exits. Use --durable to keep them.");
+    eprintln!(
+        "warning: Job Object limits lapse when the script exits. Use --durable to keep them."
+    );
     let _ = service;
     Ok(true)
 }
