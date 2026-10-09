@@ -38,7 +38,7 @@ machine. The binary is ~1 MB.
 | Python removed | `pip install` no longer works; `pyproject.toml` is gone |
 | No TUI | the curses TUI was dropped; `analyze` prints the same data |
 | `--durable` not implemented | Windows limits still lapse after `apply`; the flag warns |
-| Audit log not implemented | `~/.service-limiter/audit.log` is no longer written |
+| Audit log is present | JSONL at `~/.service-limiter/audit.log`, covering all events and failures |
 | Windows limits actually work | 1.x set the wrong Job Object flags and applied nothing; see CHANGELOG |
 | `generate` exit code | 1.x exited 1 when nothing exceeded policy; 2.0 exits 0 |
 

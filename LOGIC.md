@@ -500,5 +500,5 @@ Claims **not** covered by a test, and how to verify by hand:
 | 4 | Single-interval sampling | misses short spikes | §2.3 |
 | 5 | No `revert` / `status` command | `apply` is a one-way door | backups exist but must be restored by hand |
 | 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host | needs a Windows runner |
-| 7 | `profiles/` duplicated at repo root | redundant file | §6 |
-| 8 | `--durable` and the audit log are not in the Rust build yet | Windows limits lapse; no local record of applies | MIGRATING.md |
+| 7 | ~~`profiles/` duplicated at repo root~~ | redundant file; cleaned up | §6 |
+| 8 | `--durable` not yet implemented | Windows limits lapse; use --durable to hold the handle (supervised process coming later) | MIGRATING.md |
