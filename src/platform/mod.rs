@@ -18,6 +18,12 @@ pub use windows::{discover_services, main_pid, DEFAULT_INTERVAL};
 
 /// Process-tree measurement. Identical on both platforms because sysinfo
 /// already abstracts the underlying /proc and Windows APIs.
+///
+/// NOTE on units: `cpu_percent` is **per-core**, not a fraction of the machine.
+/// Measured on this host: one saturated thread reads ~161%. So 100% == one core.
+/// This is the same convention psutil uses, and it is NOT the convention
+/// systemd's `CPUQuota=` uses (where 100% == one core too, but the policy field
+/// `cpu_percent` reads as a whole-machine share). See LOGIC.md 3.1.
 pub fn sample_tree(root: u32, interval: std::time::Duration) -> Option<Sample> {
     sample_tree_shared(root, interval)
 }
