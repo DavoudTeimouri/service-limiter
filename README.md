@@ -1,155 +1,230 @@
 # Service Limiter
 
-> A cross-platform tool for discovering services, profiling resource usage, and applying policies to limit CPU, memory, and I/O.
+> Discover OS services, measure real CPU/memory/IO, generate and apply OS-native limits.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/DavoudTeimouri/service-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/DavoudTeimouri/service-limiter/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/DavoudTeimouri/service-limiter?include_prereleases)](https://github.com/DavoudTeimouri/service-limiter/releases)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-555)
+
+Python 3.8+, single dependency (`psutil`).
+
+For how the tool works and the domain traps it has to respect, read
+**[LOGIC.md](LOGIC.md)**.
+
+---
 
 ## Why This Exists
 
-System administrators and developers need to control resource usage of services to prevent noisy neighbors and ensure system stability. Service Limiter provides a unified way to analyze, generate, and apply resource policies across Windows and Linux.
+One service can starve the machine. You want a CPU, memory, and I/O ceiling per
+service, enforced by the operating system rather than by hoping the application is
+polite.
 
-## Features
+Service Limiter measures what a service *actually* uses, not what it claims, and
+writes the limit in the native mechanism: systemd drop-ins on Linux, Job Objects on
+Windows. It never edits an application's own configuration, and it never changes
+anything without your confirmation.
 
-- Cross-platform service discovery (Windows WMI/PowerShell, Linux systemctl)
-- Resource profiling using `psutil`
-- Policy-based limiting with default thresholds (CPU 80%, Memory 512MB, IO 1MB/s read, 512KB/s write)
-- OS-specific configuration generation:
-  - Linux: Systemd override files
-  - Windows: PowerShell scripts to create and configure Job Objects
-- CLI and TUI (Linux only) for interactive analysis
-- Profile support for easy configuration of different service types
-- Human-in-the-loop design for applying configurations
+---
 
-## Quick Start
+## What It Does / Does Not Do
+
+**Does**: discover services, measure real usage over a sample window, compare against
+a policy, generate the OS-native config, install it with backups and validation, log
+every action.
+
+**Does not**: persist Windows limits across a service restart (see below), manage
+cgroups, or install software.
+
+---
+
+## Install
 
 ```bash
 pip install service-limiter
-service-limiter analyze
-service-limiter generate --profile web-server --output ./config
-service-limiter apply --config ./config --dry-run
 ```
 
-## Installation
+From source:
 
-### Prerequisites
-- Python 3.8+
-- pip
-
-### From Source
 ```bash
 git clone https://github.com/DavoudTeimouri/service-limiter.git
 cd service-limiter
 pip install -e .
 ```
 
-### Using PyInstaller (Windows and Linux)
+Portable build (no Python needed on the target machine):
+
 ```bash
-pyinstaller --onefile service_limiter/cli/main.py
+pip install pyinstaller
+pyinstaller --onefile --name service-limiter --add-data "profiles;profiles" service_limiter/cli/main.py
 ```
 
-## Usage
+---
 
-### Analyze Services
+## Quick Start
+
 ```bash
+# 1. See what services exist and what they use
 service-limiter analyze
-```
-Discovers running services and profiles their resource usage.
 
-Sample output:
-```
-+----------------------+-------+--------+---------+----------+----------+--------+--------+
-| Service              | PID   | CPU %  | Mem MB  | Read KB/s| Write KB/s| Policy | Status |
-+----------------------+-------+--------+---------+----------+----------+--------+--------+
-| Dhcp                 | 1234  | 0.5    | 45.2    | 10.5     | 5.2      | default| OK     |
-| WinDefend            | 5678  | 2.1    | 120.5   | 50.0     | 20.0     | default| VIOLATION (CPU, Mem) |
-+----------------------+-------+--------+---------+----------+----------+--------+--------+
+# 2. Write configs for anything over the policy
+service-limiter generate --profile web-server --output ./config
+
+# 3. Preview
+sudo service-limiter apply --config ./config --dry-run
+
+# 4. Apply (asks before each service)
+sudo service-limiter apply --config ./config
 ```
 
-### Generate Configuration
+On Windows, run an **elevated** terminal instead of using `sudo`.
+
+---
+
+## Platform Support
+
+| Capability | Linux (systemd, x64/arm64) | Windows (10/11, x64) |
+|---|---|---|
+| Discovery | `systemctl list-units` | `Get-CimInstance Win32_Service` |
+| Profiling | main PID + **full child tree** | main PID (children not walked) |
+| CPU limit | `CPUQuota`, per **single** CPU | Job Object `CpuRate` |
+| Memory limit | `MemoryMax` | Job Object `JOB_OBJECT_LIMIT_JOB_MEMORY` |
+| I/O limit | `IOReadBandwidthMax`, only when the profile has `io_device` | Job Object I/O rate control |
+| Durable | **Yes**, systemd owns the drop-in | **No by default**, see below |
+| TUI | yes | no |
+| macOS / BSD | unsupported | unsupported |
+
+**Windows limits are not durable by default.** A Job Object's limits live only while a
+handle to it is open. `apply` runs a one-shot script, so its limits lapse when the
+script exits, and a service restart drops them entirely. Use `--durable` to keep a
+process alive holding the handle:
+
+```powershell
+service-limiter apply --config .\config --yes --durable
+```
+
+Windows has no supported native per-service Job Object limit surface, so this is a
+holder-process workaround rather than a real fix. See [LOGIC.md](LOGIC.md).
+
+---
+
+## Commands
+
+### `service-limiter analyze [--profile NAME]`
+
+Discovers services and measures them. Prints a count and the first few services.
+
+```bash
+service-limiter analyze --profile web-server
+```
+
+### `service-limiter generate --profile NAME [--output DIR]`
+
+Writes configs for every service over the policy.
+
 ```bash
 service-limiter generate --profile web-server --output ./config
 ```
-Generates a configuration file based on the 'web-server' profile.
 
-Output directory structure:
-```
-./config/
-├── linux/
-│   └── <service_name>.override
-└── windows/
-    └── <service_name>_limits.ps1
-```
+Creates `./config/<service>/override.conf` on Linux or
+`./config/<service>/Set-JobLimits.ps1` on Windows. Exits 0 even when nothing exceeded
+the policy, so check stdout for the count.
 
-### Apply Configuration
-```bash
-service-limiter apply --config ./config
-```
-Applies the generated configuration (requires admin/root). Use `--dry-run` to preview changes.
+### `service-limiter apply --config DIR [--dry-run] [--yes] [--durable]`
 
-### TUI (Linux only)
-```bash
-service-limiter tui
-```
-Launches a terminal user interface for interactive analysis and configuration.
+Installs staged configs.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | print what would happen, change nothing |
+| `--yes` | skip the per-service confirmation |
+| `--durable` | Windows only, hold the Job Object handle open |
+
+On Linux, in order: verify the drop-in with `systemd-analyze verify` (**before**
+touching `/etc`), back up any existing `override.conf` to `.bak`, then
+`daemon-reload` + `restart`.
+
+### `service-limiter tui`
+
+Linux only. Browse services and their measured usage. Read-only, it does not apply
+limits.
+
+---
 
 ## Configuration Profiles
 
-Profiles are JSON files that define resource limits per service type. The tool includes a built-in 'web-server' profile, and users can create custom profiles.
+Profiles are JSON files bundled with the package. `--profile NAME` loads `NAME.json`
+from `service_limiter/profiles/`.
 
-Example profile (web-server.json):
 ```json
 {
   "cpu_percent": 50,
   "memory_mb": 256,
   "io_read_kbps": 512,
-  "io_write_kbps": 256
+  "io_write_kbps": 256,
+  "io_device": "/dev/sda1"
 }
 ```
 
-## Policy Engine
+| Key | Required | Meaning |
+|---|---|---|
+| `cpu_percent` | yes | CPU share, see the `CPUQuota` caveat below |
+| `memory_mb` | yes | max RSS in MB |
+| `io_read_kbps` | yes | read bandwidth in KB/s |
+| `io_write_kbps` | yes | write bandwidth in KB/s |
+| `io_device` | **no** | block device; without it I/O limits are skipped |
 
-Service Limiter includes a policy engine that evaluates resource usage against defined limits. The engine checks CPU, memory, read I/O, and write I/O. By default, it uses:
-- CPU: 80%
-- Memory: 512 MB
-- Read I/O: 1 MB/s
-- Write I/O: 512 KB/s
+A missing or malformed profile is a **hard error**, never a silent fallback.
 
-These defaults can be overridden by creating a custom policy profile.
+> `CPUQuota=50%` means 50% of **one** CPU, not 50% of the machine. This is a known,
+> unresolved mismatch. See [LOGIC.md](LOGIC.md).
 
-## Human-in-the-Loop
+---
 
-For safety, changes that would affect more than 80% of resources or more than 100 services require explicit confirmation in the TUI or via the CLI.
+## Exit Codes
 
-## OS-Specific Details
+| Code | Meaning |
+|---|---|
+| `0` | ran clean, nothing over policy |
+| `1` | at least one service exceeded the policy |
+| `2` | error, no systemd, nothing measurable, or bad config |
+| `3` | `apply` needs root (Linux) |
 
-### Linux
-- Uses systemd override files located in `/etc/systemd/system/<service>.d/`
-- Applies limits via `MemoryLimit`, `CPUQuota`, `IOReadBandwidthMax`, and `IOWriteBandwidthMax` directives
-- Requires `systemctl daemon-reload` and `systemctl restart <service>` after applying
+Zero measurable services exits `2`, so exit `0` always means the tool really worked.
 
-### Windows
-- Generates PowerShell scripts that create and configure Job Objects
-- Sets memory limits, CPU limits, and I/O bandwidth limits via Job Object APIs
-- Must be run as Administrator
+---
 
-## Sample Output
+## Audit Log
 
-See the **Usage** section above for sample outputs of each command.
+Every `analyze`, `generate`, and `apply` appends one JSON line to
+`~/.service-limiter/audit.log`:
+
+```json
+{"event": "apply", "time": "2026-09-30T15:04:22+0000", "config": "./config", "dry_run": false, "ok": true}
+{"event": "apply_denied", "time": "...", "reason": "not_root", "config": "./config"}
+```
+
+---
 
 ## Troubleshooting
 
-- **Command not found**: Ensure you have installed the package with `pip install -e .` or used PyInstaller.
-- **No services detected**: On Linux, ensure you are running on a system with systemd. On Windows, ensure WMI is accessible.
-- **Permission denied**: Apply operations require root (Linux) or Administrator (Windows) privileges.
-- **Profile not found**: Ensure the profile JSON file exists in the `profiles/` directory.
+- **"systemctl not found"** - this host does not run systemd, which Linux support requires.
+- **Exit 2 from `analyze`** - no service could be profiled. Either no live MainPID, or reading process stats needs root.
+- **"Profile not found"** - the error lists the available names.
+- **I/O limits missing from the drop-in** - your profile has no `io_device`, and systemd needs a block device path per limit.
+- **"AssignProcessToJobObject failed" on Windows** - the service is probably already inside a job object, common under IIS or a service host.
+- **Windows limits vanish** - expected, use `--durable`.
+
+---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md)
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT © [Your Name](https://github.com/yourname)
+MIT (c) [Davoud Teimouri](https://github.com/DavoudTeimouri) - see [LICENSE](LICENSE).
 
-## [CHANGELOG.md](CHANGELOG.md)
+## Changelog
 
+See [CHANGELOG.md](CHANGELOG.md).

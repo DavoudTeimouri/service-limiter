@@ -7,9 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- `apply --durable` (Windows): holds the Job Object handle open in a background process so limits do not lapse when the script exits
+- Logged every analyze/generate/apply event to `~/.service-limiter/audit.log` as JSONL
+- CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, issue and pull request templates
+- LOGIC.md: durable reference for how the tool works and the domain traps it respects
+
 ### Changed
+- Windows Job Object limits now use the documented Win32 information classes instead of a single mislabelled flag field
+- `apply` without `--durable` now says out loud that Windows limits will lapse
+- README rewritten against the real CLI: corrected systemd directives, added exit codes, audit log, and an honest platform matrix
+- USER_GUIDE.md folded into README and removed (was ~90% duplicate)
+- profiles are loaded from package data; the repo-root profiles/ duplicate is deleted
+
 ### Fixed
+- Windows memory limit never applied: LimitFlags used 0x20 (JOB_OBJECT_LIMIT_PRIORITY_CLASS) and 0x400 (DIE_ON_UNHANDLED_EXCEPTION) while commented JOB_MEMORY|JOB_IO_RATE. Real JOB_OBJECT_LIMIT_JOB_MEMORY is 0x00000200
+- Windows I/O limits were written into JOBOBJECT_EXTENDED_LIMIT_INFORMATION.IoInfo, which holds read-only IO_COUNTERS accounting counters and is a silent no-op. Now uses JOBOBJECT_IO_RATE_CONTROL_INFORMATION
+- Windows applied no CPU limit at all: cpu_rate was computed in Python but never interpolated into the script
+- PowerShell script no longer claims success when AssignProcessToJobObject fails; it exits 2
+- `tui` on a non-Linux host exited 0 on failure; now exits 2
+- `generate` exited a bare literal 1 when nothing exceeded the policy, which aborted `set -e` scripts on a clean run; now exits 0
+- Every SLJob struct the script instantiates is now declared in the C# shim
+- 5 new Windows tests assert the real flag value, that IO_COUNTERS is never written, that CpuRate is interpolated, that it clamps at 10000, and that structs are declared. The previous test only grepped for API names, which is how these bugs shipped
+
 ### Removed
+- architecture.md, STRUCTURE.md, GITHUB_SETUP.md (stale; described a ConfigGenerator, subagents, and a Textual TUI that no longer exist)
+- USER_GUIDE.md (folded into README)
+- Repo-root profiles/ directory (byte-identical duplicate that is never loaded)
 
 ## [1.0.0] - 2026-09-30
 ### Added
@@ -41,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Silent no-op I/O limits: systemd accepted the drop-in but ignored ReadBandwidthMax/WriteBandwidthMax (wrong directives)
 - generate --output was accepted and ignored, breaking the documented generate->apply workflow
 - Windows PowerShell script used non-existent cmdlets (New-JobObject, Set-JobObject, Get-JobObject, Remove-JobObject)
-- CPUQuota=80% means 80% of ONE CPU (systemd semantics), not 80% of machine (policy semantics)
+- Documented the CPUQuota per-single-CPU semantics (not fixed in code; see Known issues in LOGIC.md)
 - dummy-service fabrication on non-systemd hosts reported fake results as real
 - All 25 tracked .pyc/egg-info/backup files removed; .gitignore added
 - Windows discovery called ServiceDescriptor with 3 of 6 required args (TypeError)
