@@ -28,9 +28,17 @@ pub struct GeneratedConfig {
 pub fn generate_linux_config(service: &ServiceDescriptor, policy: &Policy) -> GeneratedConfig {
     // Truncating a sub-1 limit to 0 would emit CPUQuota=0%, which systemd reads
     // as "never run", so clamp rather than round down to nothing.
-    let cpu = (policy.cpu_percent as u32).max(1);
     let mem = (policy.memory_mb as u64).max(1);
-    let mut content = format!("[Service]\nCPUQuota={cpu}%\nMemoryMax={mem}M\n");
+
+    // `cpu_percent` is a share of the whole machine, but systemd's CPUQuota is
+    // measured against ONE CPU, so 50% of a 4-core box is 200%. Converting here
+    // is what makes the policy mean what the operator wrote. Before this, the
+    // tool measured machine-share and enforced per-core, so the limit was far
+    // tighter than the policy it came from. See LOGIC.md 3.1.
+    let cores = crate::platform::cpu_count() as f64;
+    let quota = (policy.cpu_percent as f64 * cores).round().max(1.0) as u64;
+
+    let mut content = format!("[Service]\nCPUQuota={quota}%\nMemoryMax={mem}M\n");
 
     let mut warnings = Vec::new();
     match policy.io_device.as_deref().filter(|d| !d.is_empty()) {
@@ -73,8 +81,12 @@ pub fn generate_linux_config(service: &ServiceDescriptor, policy: &Policy) -> Ge
 pub fn generate_windows_config(service: &ServiceDescriptor, policy: &Policy) -> GeneratedConfig {
     let mem_bytes = (policy.memory_mb as u64) * 1024 * 1024;
     let read_bytes = (policy.io_read_kbps as u64) * 1024;
-    // CpuRate is in units of 1/10000 of a CPU; 100% == 10000.
-    let cpu_rate = ((policy.cpu_percent as u64) * 100).min(10000);
+    // CpuRate is in units of 1/10000 of ONE CPU, and `cpu_percent` is a share of
+    // the whole machine, so scale by core count exactly as the systemd path does.
+    // 50% of a 4-core box is 200% of one core = 20000/10000.
+    let cores = crate::platform::cpu_count() as f64;
+    let quota = (policy.cpu_percent as f64 * cores).min(100.0);
+    let cpu_rate = ((quota * 100.0).round() as u64).min(10000);
 
     let content = include_str!("job_limits.ps1")
         .replace("{service}", &service.name)
@@ -105,11 +117,54 @@ mod tests {
         }
     }
 
+    /// CPUQuota is per-CPU, so the expected value depends on the host's core
+    /// count. Asserting the relationship rather than a literal keeps this test
+    /// correct on any machine, including CI runners.
     #[test]
-    fn memory_and_cpu_directives() {
+    fn cpu_quota_is_machine_share_converted_to_per_cpu() {
+        let cores = crate::platform::cpu_count() as f64;
         let cfg = generate_linux_config(&ServiceDescriptor::new("sshd"), &policy());
-        assert!(cfg.content.contains("CPUQuota=50%"), "{}", cfg.content);
+        let expected = (50.0 * cores).round() as u64;
+        assert!(
+            cfg.content.contains(&format!("CPUQuota={expected}%")),
+            "expected CPUQuota={expected}% on {cores} cores, got:\n{}",
+            cfg.content
+        );
         assert!(cfg.content.contains("MemoryMax=256M"), "{}", cfg.content);
+    }
+
+    /// A 100% policy must allow the whole machine, i.e. N cores' worth.
+    #[test]
+    fn full_machine_policy_allows_all_cores() {
+        let cores = crate::platform::cpu_count() as f64;
+        let full = Policy {
+            cpu_percent: 100.0,
+            ..policy()
+        };
+        let cfg = generate_linux_config(&ServiceDescriptor::new("sshd"), &full);
+        let expected = (100.0 * cores).round() as u64;
+        assert!(
+            cfg.content.contains(&format!("CPUQuota={expected}%")),
+            "100% policy should be {expected}% on {cores} cores, got:\n{}",
+            cfg.content
+        );
+    }
+
+    /// A sub-1 limit must not truncate to CPUQuota=0%, which systemd reads as
+    /// "never run".
+    #[test]
+    fn sub_one_cpu_limit_never_becomes_zero() {
+        let tiny = Policy {
+            cpu_percent: 0.1,
+            ..policy()
+        };
+        let cfg = generate_linux_config(&ServiceDescriptor::new("sshd"), &tiny);
+        assert!(
+            cfg.content.contains("CPUQuota=1%"),
+            "must clamp to at least 1%, got:\n{}",
+            cfg.content
+        );
+        assert!(!cfg.content.contains("CPUQuota=0%"));
     }
 
     #[test]
@@ -209,14 +264,18 @@ mod tests {
         assert!(s.contains("JOBOBJECT_IO_RATE_CONTROL_INFORMATION"), "{s}");
     }
 
+    /// Windows CpuRate is also per-CPU, so it gets the same core scaling.
     #[test]
     fn windows_cpu_rate_is_applied_and_clamped() {
+        let cores = crate::platform::cpu_count() as f64;
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
+        let expected = ((50.0 * cores).min(100.0) * 100.0).round() as u64;
         assert!(
-            s.contains("$cpu.CpuRate = 5000"),
-            "50% * 100 not interpolated"
+            s.contains(&format!("$cpu.CpuRate = {expected}")),
+            "50% of {cores} cores should be {expected}, got:\n{s}"
         );
 
+        // Cannot exceed 10000 (one full core), whatever the policy says.
         let over = Policy {
             cpu_percent: 250.0,
             ..policy()

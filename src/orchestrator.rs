@@ -67,11 +67,15 @@ fn profile_services(services: &[ServiceDescriptor]) -> BTreeMap<String, Resource
             continue;
         };
         let secs = sample.elapsed_secs;
+        // The sampler reports per-core usage; the policy field is a share of the
+        // whole machine, so normalize here rather than in the generator.
+        let cores = crate::platform::cpu_count() as f32;
         out.insert(
             svc.name.clone(),
             ResourceProfile {
                 service_name: svc.name.clone(),
-                cpu_percent: sample.cpu_percent,
+                cpu_percent: sample.cpu_percent / cores,
+                cpu_percent_percore: sample.cpu_percent,
                 memory_mb: sample.rss_bytes as f64 / 1024.0 / 1024.0,
                 io_read_kbps: sample.read_bytes as f64 / 1024.0 / secs,
                 io_write_kbps: sample.write_bytes as f64 / 1024.0 / secs,

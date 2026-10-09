@@ -171,22 +171,40 @@ Profiles are JSON overrides with the same four keys. A missing or malformed prof
 different limits than the operator asked for is worse than refusing to run.
 → `profile::tests::missing_profile_is_an_error_not_a_fallback`
 
-### 3.1 The CPU unit trap
+### 3.1 CPU units — how `cpu_percent` is interpreted
 
-> `CPUQuota=80%` means **80% of one CPU**, not 80% of the machine.
-> systemd: *"The percentage specifies how much CPU time the unit shall get at maximum,
-> relative to the total CPU time available on one CPU."*
+`cpu_percent` is a **share of the whole machine, 0–100**. One saturated core of a 4-core
+box is 25.
 
-So a service using 4 of 8 cores passes a `cpu_percent: 50` check, yet the generated limit
-throttles it to half of one core. **The policy measures and the config enforces different
-quantities.** Unresolved by design as of v1.0.0.
+Both the measurement and the enforcement are normalized, so a limit means what the
+operator wrote:
 
-Options, for whoever picks this up:
-- Keep `cpu_percent` as whole-machine share and emit `CPUQuota={cpu_percent × cpu_count}%`.
-- Rename the field to something explicit like `cpu_percent_single_core` and document 0–100 per core.
+| Layer | Native unit | Normalized to |
+|---|---|---|
+| Sampler (`sysinfo`) | per-core; 100 == one saturated core | ÷ `cpu_count()` |
+| systemd `CPUQuota=` | per-CPU; 100 == one core | × `cpu_count()` |
+| Windows `CpuRate` | per-CPU, in 1/10000 units | × `cpu_count()`, clamped at 10000 |
 
-A test asserts the current literal behaviour, so changing this **must** update
-`config_gen::tests::memory_and_cpu_directives`.
+So `cpu_percent: 50` on a 4-core box emits `CPUQuota=200%`.
+
+> **This was wrong until 2.0.1.** Earlier versions emitted `CPUQuota={cpu_percent}%`
+> while `cpu_percent` read as a whole-machine share, so the measurement and the
+> enforced limit described different quantities and the limit was far tighter than
+> the policy it came from — on a 32-core box a `50` policy throttled a service to
+> 1.6% of the machine.
+
+**`cpu_count()` is `available_parallelism()`, not `nproc`.** That respects the cgroup
+CPU quota, which is the right denominator: a container capped at 1 CPU reports 1
+even on a 32-core host. Scaling by host cores would emit a quota the cgroup could
+never grant, so the limit could never bind. On this container: `nproc` says 2
+(scheduler affinity), cgroup `cpu.max` says 1, so `cpu_count()` returns 1.
+
+`ResourceProfile` carries both figures: `cpu_percent` (machine share, the one the
+policy compares) and `cpu_percent_percore` (raw, better for diagnosing which core is
+hot).
+
+Tests assert the *relationship*, not a literal, so they hold on any machine:
+`config_gen::tests::cpu_quota_is_machine_share_converted_to_per_cpu`.
 
 ---
 
@@ -207,7 +225,7 @@ IOWriteBandwidthMax=/dev/sda1 262144
 
 | Directive | Value |
 |---|---|
-| `CPUQuota` | `<cpu_percent>%` — per single CPU, see §3.1 |
+| `CPUQuota` | `cpu_percent × cpu_count`% — systemd counts per-CPU, see §3.1 |
 | `MemoryMax` | `<memory_mb>M` |
 | `IOAccounting` | `yes`, required for I/O accounting |
 | `IOReadBandwidthMax` | `<io_device> <io_read_kbps × 1024>` bytes/s |
@@ -299,12 +317,35 @@ anything. Zero measurable services is a failure, not a clean run.
 One JSON object per line at `~/.service-limiter/audit.log`:
 
 ```json
-{"event": "apply", "time": "2026-09-30T15:04:22+0000", "config": "./config", "dry_run": false, "ok": true}
+{"event": "analyze", "time": "2026-10-09T09:51:42+0000", "discovered": "2", "profiled": "2", "over_policy": "0"}
+{"event": "generate", "time": "...", "output": "./config", "count": "1"}
+{"event": "apply", "time": "...", "config": "./config", "dry_run": "true", "applied": "1", "skipped": "0", "failed": "0"}
 {"event": "apply_denied", "time": "...", "reason": "not_root", "config": "./config"}
+{"event": "analyze_error", "time": "...", "error": "systemctl not available: ...", "profile": "default"}
 ```
 
-No rotation, no locking — a deliberate simplification. Add rotation only when the file
-actually grows large.
+**Events**: `analyze`, `generate`, `apply`, and the failure paths
+`analyze_error`, `generate_error`, `apply_error`, `apply_denied`. A run that
+fails is recorded too — an audit log that only shows successes hides exactly the
+runs you would want to review.
+
+Two deliberate properties:
+
+- **Failure to write never fails the operation.** An unwritable log warns on
+  stderr; it does not stop a limit from being applied. Losing an audit line is
+  bad, refusing to apply because of it is worse.
+- **Values are JSON-escaped.** A crafted service name cannot break out of the
+  string and forge a log line. Covered by `audit::tests::escapes_hostile_values`.
+
+Set `SERVICE_LIMITER_HOME` to relocate the log (also keeps tests off the real
+home directory).
+
+No rotation, no locking — a deliberate simplification. Add rotation when the
+file actually grows large.
+
+Timestamps are UTC, formatted by hand (Howard Hinnant's `civil_from_days`) to
+avoid a date dependency. `audit::tests::civil_conversion_matches_known_dates`
+pins the conversion against known dates.
 
 ---
 
@@ -322,7 +363,7 @@ actually grows large.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `cpu_percent` | yes | CPU share, see the §3.1 trap |
+| `cpu_percent` | yes | CPU share of the whole machine, 0–100, see §3.1 |
 | `memory_mb` | yes | max RSS, MB |
 | `io_read_kbps` | yes | read bandwidth, KB/s |
 | `io_write_kbps` | yes | write bandwidth, KB/s |
@@ -352,6 +393,7 @@ from a wheel, a venv, or a source checkout.
 | `policy.rs` | thresholds and `evaluate()` |
 | `config_gen.rs` | systemd drop-in + Windows script text |
 | `apply.rs` | privileged install path, validation, backup, confirmation |
+| `audit.rs` | JSONL audit log at `~/.service-limiter/audit.log` |
 | `platform/mod.rs` | `cfg` dispatch and the shared process-tree sampler |
 | `platform/linux.rs` | systemctl discovery, MainPID, output parser |
 | `platform/windows.rs` | CIM discovery, PowerShell shell detection |
@@ -410,7 +452,13 @@ implemented. See [MIGRATING.md](MIGRATING.md).
 | systemd directives correct | `config_gen::tests::io_directives_use_real_systemd_names` |
 | legacy directives gone | `config_gen::tests::bogus_legacy_io_directives_are_absent` |
 | summary line not a service | `platform::linux::tests::trailing_summary_line_is_not_a_service` |
-| CPU/memory text | `config_gen::tests::memory_and_cpu_directives` |
+| CPU quota normalized per-CPU | `config_gen::tests::cpu_quota_is_machine_share_converted_to_per_cpu` |
+| 100% policy allows all cores | `config_gen::tests::full_machine_policy_allows_all_cores` |
+| `CPUQuota=0%` never emitted | `config_gen::tests::sub_one_cpu_limit_never_becomes_zero` |
+| audit line is valid JSON | `audit::tests::renders_a_json_object` |
+| audit escapes hostile values | `audit::tests::escapes_hostile_values` |
+| audit writes one line per event | `audit::tests::writes_one_line_per_event` |
+| audit timestamps | `audit::tests::civil_conversion_matches_known_dates` |
 | drop-in path | `config_gen::tests::drop_in_path_is_service_dot_service_d` |
 | I/O skipped without a device | `config_gen::tests::io_skipped_with_warning_when_no_device` |
 | no invented cmdlets | `config_gen::tests::windows_script_has_no_invented_cmdlets` |
@@ -446,7 +494,7 @@ Claims **not** covered by a test, and how to verify by hand:
 
 | # | Problem | Impact | Notes |
 |---|---|---|---|
-| 1 | `CPUQuota` is per-single-CPU, `cpu_percent` reads as whole-machine | limits differ from the policy the operator wrote | §3.1 |
+| 1 | ~~`CPUQuota` per-CPU vs whole-machine `cpu_percent`~~ | **fixed in 2.0.1**, both sides now normalized | §3.1 |
 | 2 | Windows Job Object limits lapse when the script exits | enforcement is transient | §4.2 |
 | 3 | I/O limits need a device path, so profiles without `io_device` get none | I/O silently unenforced | §4.1 |
 | 4 | Single-interval sampling | misses short spikes | §2.3 |

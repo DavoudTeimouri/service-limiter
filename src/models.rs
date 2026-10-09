@@ -32,8 +32,16 @@ impl ServiceDescriptor {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResourceProfile {
     pub service_name: String,
-    /// Summed across the process tree; exceeds 100 on multiple cores.
+    /// CPU use as a share of the whole machine, 0-100.
+    ///
+    /// The raw sampler reports per-core usage (100 == one saturated core), so
+    /// this is normalized by the core count. A service saturating one core of a
+    /// 4-core box reads 25.
     pub cpu_percent: f32,
+    /// The same measurement before normalization, where 100 means one saturated
+    /// core. Kept because it is the more useful number when diagnosing which
+    /// core is hot.
+    pub cpu_percent_percore: f32,
     pub memory_mb: f64,
     pub io_read_kbps: f64,
     pub io_write_kbps: f64,

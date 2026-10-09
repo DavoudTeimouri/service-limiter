@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Audit log restored in the Rust build: JSONL at `~/.service-limiter/audit.log`, covering `analyze`, `generate`, `apply`, and the failure paths `analyze_error`, `generate_error`, `apply_error`, `apply_denied`. Failed runs are recorded, not just successful ones. `SERVICE_LIMITER_HOME` relocates it. Values are JSON-escaped so a crafted service name cannot forge a line
+- `ResourceProfile.cpu_percent_percore`: the raw per-core figure, alongside the normalized machine share
+
 ### Changed
+- `cpu_percent` is now a consistent whole-machine share. Both the measurement (divided by core count) and the generated limits (multiplied by it) are normalized, so the limit matches the policy that produced it
+
 ### Fixed
+- CPU limits were far tighter than the policy that set them: `CPUQuota={cpu_percent}%` was emitted while `cpu_percent` read as a whole-machine share, but systemd measures `CPUQuota` per-CPU. On a 32-core host a `50` policy throttled a service to 1.6% of the machine. Windows `CpuRate` had the same mismatch. Core count comes from `available_parallelism()`, which respects the cgroup CPU quota, so a container capped at 1 CPU scales correctly instead of emitting a quota the cgroup can never grant
+
 ### Removed
 
 ## [2.0.0] - 2026-10-09

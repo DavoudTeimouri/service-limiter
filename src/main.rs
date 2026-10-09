@@ -3,6 +3,7 @@
 //! See LOGIC.md for how this works and the platform traps it respects.
 
 mod apply;
+mod audit;
 mod config_gen;
 mod models;
 mod orchestrator;
@@ -100,6 +101,10 @@ fn analyze(profile_name: Option<&str>) -> u8 {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
+            audit::record(
+                "analyze_error",
+                &[("error", e.clone()), ("profile", policy.name.clone())],
+            );
             return exit::ERROR;
         }
     };
@@ -118,8 +123,23 @@ fn analyze(profile_name: Option<&str>) -> u8 {
     // must not look like a clean run.
     if result.profiles.is_empty() {
         eprintln!("error: no service could be profiled (no live MainPID, or needs root)");
+        audit::record(
+            "analyze",
+            &[
+                ("discovered", result.services.len().to_string()),
+                ("profiled", "0".to_string()),
+            ],
+        );
         return exit::ERROR;
     }
+    audit::record(
+        "analyze",
+        &[
+            ("discovered", result.services.len().to_string()),
+            ("profiled", result.profiles.len().to_string()),
+            ("over_policy", result.over_policy.len().to_string()),
+        ],
+    );
     if result.over_policy.is_empty() {
         exit::OK
     } else {
@@ -136,12 +156,17 @@ fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
+            audit::record(
+                "generate_error",
+                &[("error", e.clone()), ("profile", policy.name.clone())],
+            );
             return exit::ERROR;
         }
     };
 
     if result.configs.is_empty() {
         println!("No configs generated: no service exceeded the policy.");
+        audit::record("generate", &[("count", "0".to_string())]);
         return exit::OK;
     }
 
@@ -175,6 +200,13 @@ fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
         result.configs.len(),
         output.display()
     );
+    audit::record(
+        "generate",
+        &[
+            ("output", output.display().to_string()),
+            ("count", result.configs.len().to_string()),
+        ],
+    );
     exit::OK
 }
 
@@ -202,6 +234,16 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
                 "applied {}, skipped {}, failed {}",
                 outcome.applied, outcome.skipped, outcome.failed
             );
+            audit::record(
+                "apply",
+                &[
+                    ("config", config.display().to_string()),
+                    ("dry_run", dry_run.to_string()),
+                    ("applied", outcome.applied.to_string()),
+                    ("skipped", outcome.skipped.to_string()),
+                    ("failed", outcome.failed.to_string()),
+                ],
+            );
             if outcome.is_ok() {
                 exit::OK
             } else {
@@ -210,6 +252,13 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
         }
         Err(e) => {
             eprintln!("error: {e}");
+            audit::record(
+                "apply_error",
+                &[
+                    ("config", config.display().to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
             exit::ERROR
         }
     }

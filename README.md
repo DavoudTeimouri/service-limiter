@@ -175,7 +175,7 @@ from `service_limiter/profiles/`.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `cpu_percent` | yes | CPU share, see the `CPUQuota` caveat below |
+| `cpu_percent` | yes | CPU share of the whole machine, 0–100 |
 | `memory_mb` | yes | max RSS in MB |
 | `io_read_kbps` | yes | read bandwidth in KB/s |
 | `io_write_kbps` | yes | write bandwidth in KB/s |
@@ -183,8 +183,11 @@ from `service_limiter/profiles/`.
 
 A missing or malformed profile is a **hard error**, never a silent fallback.
 
-> `CPUQuota=50%` means 50% of **one** CPU, not 50% of the machine. This is a known,
-> unresolved mismatch. See [LOGIC.md](LOGIC.md).
+`cpu_percent` is a share of the **whole machine**. Both the measurement and the
+generated limit are normalized to match, so `50` on a 4-core box emits
+`CPUQuota=200%` (systemd counts per-CPU). Core count follows the cgroup CPU
+quota, so a container capped at 1 CPU reports 1. See
+[LOGIC.md §3.1](LOGIC.md).
 
 ---
 
@@ -203,13 +206,19 @@ Zero measurable services exits `2`, so exit `0` always means the tool really wor
 
 ## Audit Log
 
-Every `analyze`, `generate`, and `apply` appends one JSON line to
-`~/.service-limiter/audit.log`:
+Every run appends one JSON line to `~/.service-limiter/audit.log`, including
+runs that fail:
 
 ```json
-{"event": "apply", "time": "2026-09-30T15:04:22+0000", "config": "./config", "dry_run": false, "ok": true}
+{"event": "analyze", "time": "2026-10-09T09:51:42+0000", "discovered": "2", "profiled": "2", "over_policy": "0"}
+{"event": "apply", "time": "...", "config": "./config", "dry_run": "true", "applied": "1", "skipped": "0", "failed": "0"}
 {"event": "apply_denied", "time": "...", "reason": "not_root", "config": "./config"}
+{"event": "analyze_error", "time": "...", "error": "systemctl not available: ...", "profile": "default"}
 ```
+
+Set `SERVICE_LIMITER_HOME` to write it elsewhere. If the log cannot be written
+the tool warns and continues: losing an audit line is bad, refusing to apply a
+limit because of it is worse.
 
 ---
 

@@ -16,6 +16,21 @@ pub use linux::{discover_services, main_pid, DEFAULT_INTERVAL};
 #[cfg(target_os = "windows")]
 pub use windows::{discover_services, main_pid, DEFAULT_INTERVAL};
 
+/// Logical CPUs a service can actually use here.
+///
+/// `available_parallelism` respects the cgroup CPU quota, which is the right
+/// denominator: a container capped at 1 CPU reports 1 even if the host has 32.
+/// Scaling `cpu_percent` by the *host* core count would emit a CPUQuota above
+/// what the cgroup can ever grant, so the limit could never bind.
+///
+/// Note this can be lower than `nproc` (which reports scheduler affinity). On
+/// this host: affinity 2, cgroup quota 1, `cpu_count()` 1.
+pub fn cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 /// Process-tree measurement. Identical on both platforms because sysinfo
 /// already abstracts the underlying /proc and Windows APIs.
 ///
