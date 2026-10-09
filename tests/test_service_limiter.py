@@ -151,6 +151,42 @@ class TestWindowsConfigGeneration(unittest.TestCase):
         cfg = Orchestrator()._generate_windows_config(self.svc, POLICY)
         self.assertTrue(cfg["file_path"].endswith("Set-JobLimits.ps1"))
 
+    def test_memory_limit_uses_the_real_win32_flag(self):
+        """0x20 is JOB_OBJECT_LIMIT_PRIORITY_CLASS and 0x400 is
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION. The old script used both
+        while labelling them JOB_MEMORY|JOB_IO_RATE, so the memory limit was
+        never armed and the failure was silent."""
+        self.assertIn("0x00000200", self.script)   # JOB_OBJECT_LIMIT_JOB_MEMORY
+        self.assertNotIn("0x00000020", self.script)  # PRIORITY_CLASS
+        self.assertNotIn("0x00000400", self.script)  # DIE_ON_UNHANDLED_EXCEPTION
+
+    def test_io_limits_do_not_go_into_io_counters(self):
+        """IO_COUNTERS are read-only accounting counters. Writing limits there
+        is a silent no-op; I/O needs JOBOBJECT_IO_RATE_CONTROL_INFORMATION."""
+        self.assertNotIn("IoInfo.ReadTransferCount =", self.script)
+        self.assertNotIn("IoInfo.WriteTransferCount =", self.script)
+        self.assertIn("JOBOBJECT_IO_RATE_CONTROL_INFORMATION", self.script)
+
+    def test_cpu_rate_is_actually_applied(self):
+        """cpu_rate was computed in Python but never interpolated into the
+        script, so Windows applied no CPU limit at all."""
+        self.assertIn("$cpu.CpuRate = 5000", self.script)   # 50% * 100
+        self.assertIn("JOBOBJECT_CPU_RATE_CONTROL_INFORMATION", self.script)
+
+    def test_cpu_rate_never_exceeds_10000(self):
+        """CpuRate is in 1/10000 of a CPU; 10000 == 100%."""
+        script = Orchestrator()._generate_windows_config(
+            self.svc, dict(POLICY, cpu_percent=250))["content"]
+        self.assertIn("$cpu.CpuRate = 10000", script)
+
+    def test_structs_used_by_the_script_are_declared(self):
+        """Every SLJob struct the script instantiates must exist in the C# shim,
+        or PowerShell fails at runtime with New-Object errors."""
+        for struct in ("JOBOBJECT_CPU_RATE_CONTROL_INFORMATION",
+                       "JOBOBJECT_IO_RATE_CONTROL_INFORMATION",
+                       "JOBOBJECT_EXTENDED_LIMIT_INFORMATION"):
+            self.assertIn(f"public struct {struct}", self.script)
+
 
 class TestProfileLoading(unittest.TestCase):
     def test_bundled_profile_loads(self):
