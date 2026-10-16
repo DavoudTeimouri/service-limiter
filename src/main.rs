@@ -223,7 +223,7 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
     }
 
     #[cfg(unix)]
-    if !unsafe { libc::geteuid() } == 0 {
+    if unsafe { libc::geteuid() } != 0 {
         eprintln!("error: apply needs root: re-run with sudo.");
         return exit::NEEDS_ROOT;
     }

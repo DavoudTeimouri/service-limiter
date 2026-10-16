@@ -17,7 +17,9 @@ pub fn powershell() -> Option<&'static str> {
 
 /// MainPID of a service, from Win32_Service. 0 means not running.
 pub fn main_pid(service: &str) -> Option<u32> {
-    let script = format!("(Get-CimInstance Win32_Service -Filter \"Name='{service}\").ProcessId");
+    // Escape single quotes for PowerShell single-quoted string: ' -> ''
+    let safe = service.replace('\'', "''");
+    let script = format!("(Get-CimInstance Win32_Service -Filter \"Name='{safe}\").ProcessId");
     let out = run_ps(&script).ok()?;
     out.trim().parse().ok()
 }

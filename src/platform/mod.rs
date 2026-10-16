@@ -50,10 +50,10 @@ fn sample_tree_shared(root: u32, interval: std::time::Duration) -> Option<Sample
     let mut sys = System::new();
 
     // Prime, then measure the delta across the window.
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kinds);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, kinds);
     let started = Instant::now();
     std::thread::sleep(interval);
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kinds);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, kinds);
 
     let tree = descendents(&sys, Pid::from_u32(root));
     if tree.is_empty() {

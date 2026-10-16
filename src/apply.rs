@@ -35,7 +35,10 @@ pub fn run(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Resul
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         eprintln!("error: Unsupported platform: {}", std::env::consts::OS);
-        return Ok(Outcome::default());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("unsupported platform: {}", std::env::consts::OS),
+        ));
     }
 
     let mut entries: Vec<_> = fs::read_dir(config_dir)?.filter_map(Result::ok).collect();
