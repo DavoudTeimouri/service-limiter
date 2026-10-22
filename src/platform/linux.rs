@@ -163,6 +163,6 @@ cron.service loaded active running Regular background program processing daemon
     #[test]
     fn missing_pid_returns_none() {
         let samples = crate::platform::sample_trees(&[u32::MAX], Duration::from_millis(10));
-        assert!(samples.get(&u32::MAX).is_none());
+        assert!(!samples.contains_key(&u32::MAX));
     }
 }

@@ -264,10 +264,7 @@ mod tests {
     #[test]
     fn windows_script_reports_failures() {
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
-        assert!(
-            s.contains("ERROR:"),
-            "no error status on failure paths"
-        );
+        assert!(s.contains("ERROR:"), "no error status on failure paths");
     }
 
     #[test]

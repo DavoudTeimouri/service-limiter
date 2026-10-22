@@ -111,7 +111,9 @@ pub fn run(
 /// The installed path for a service, if this platform has one.
 #[cfg(target_os = "linux")]
 fn installed_path(service: &str) -> PathBuf {
-    PathBuf::from(format!("/etc/systemd/system/{service}.service.d/override.conf"))
+    PathBuf::from(format!(
+        "/etc/systemd/system/{service}.service.d/override.conf"
+    ))
 }
 
 /// Windows has no persistent installed artifact: limits live in a Job Object
@@ -201,7 +203,10 @@ fn revert_linux(service: &str, target: &Path) -> std::io::Result<()> {
     // Remove the drop-in directory too when it is now empty; systemd treats an
     // empty .d directory as harmless but it is clutter.
     if let Some(dir) = target.parent() {
-        if fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        if fs::read_dir(dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false)
+        {
             let _ = fs::remove_dir(dir);
         }
     }
@@ -248,7 +253,11 @@ pub fn status(config_dir: &Path) -> std::io::Result<Outcome> {
             let target = installed_path(&service);
             if target.exists() {
                 let backup = target.with_extension("conf.bak");
-                let restorable = if backup.exists() { " (backup present)" } else { "" };
+                let restorable = if backup.exists() {
+                    " (backup present)"
+                } else {
+                    ""
+                };
                 println!("{service}: installed at {}{restorable}", target.display());
                 out.applied += 1;
             } else {
@@ -370,9 +379,7 @@ fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
         .arg("verify")
         .arg(probe.path())
         .output()
-        .map_err(|e| {
-            format!("cannot run systemd-analyze to validate the config: {e}")
-        })?;
+        .map_err(|e| format!("cannot run systemd-analyze to validate the config: {e}"))?;
 
     let text = String::from_utf8_lossy(&out.stderr);
     let problems: Vec<String> = text

@@ -173,11 +173,7 @@ fn generate_removes_stale_configs() {
     // Pre-stage a config for a service that is not over policy any more.
     let stale_dir = staging.path().join("ghostservice");
     std::fs::create_dir_all(&stale_dir).unwrap();
-    std::fs::write(
-        stale_dir.join("override.conf"),
-        "[Service]\nCPUQuota=50%\n",
-    )
-    .unwrap();
+    std::fs::write(stale_dir.join("override.conf"), "[Service]\nCPUQuota=50%\n").unwrap();
 
     // A file the user put there by hand must survive.
     let keep = staging.path().join("notes.txt");

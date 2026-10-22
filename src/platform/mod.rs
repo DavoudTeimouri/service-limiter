@@ -49,10 +49,7 @@ pub const DEFAULT_WINDOWS: usize = 3;
 /// The trade-off: every tree is measured over the same window, so their
 /// numbers are directly comparable. Per-tree sampling gave each service its
 /// own window, which made the results incomparable in a different way.
-pub fn sample_trees(
-    roots: &[u32],
-    interval: std::time::Duration,
-) -> HashMap<u32, Sample> {
+pub fn sample_trees(roots: &[u32], interval: std::time::Duration) -> HashMap<u32, Sample> {
     sample_trees_over(roots, interval, DEFAULT_WINDOWS)
 }
 
