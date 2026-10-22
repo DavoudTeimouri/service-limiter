@@ -100,7 +100,7 @@ On Windows, run an **elevated** terminal instead of using `sudo`.
 |---|---|---|
 | Discovery | `systemctl list-units` | `Get-CimInstance Win32_Service` |
 | Profiling | main PID + **full child tree** | main PID + **full child tree** |
-| CPU limit | `CPUQuota`, per **single** CPU | Job Object `CpuRate` |
+| CPU limit | `CPUQuota`, per **single** CPU, can exceed 100% | Job Object `CpuRate`, **max 1 CPU** |
 | Memory limit | `MemoryMax` | Job Object `JOB_OBJECT_LIMIT_JOB_MEMORY` |
 | I/O limit | `IOReadBandwidthMax`, only when an `io_device` is known | Job Object I/O rate control |
 | Durable | **Yes**, systemd owns the drop-in | **Yes** with `--durable`, see below |
@@ -118,6 +118,11 @@ service-limiter apply --config .\config --yes --durable
 The holder does not survive a reboot. Making it survive would need a Windows
 Service or a scheduled task, which this tool does not create. See
 [LOGIC.md](LOGIC.md).
+
+**The Windows CPU limit is capped at one CPU.** The Win32 percentage CPU rate
+control cannot express more than one CPU, so on a multi-core machine a policy
+asking for more is clamped. The clamp is reported as a warning, because the
+resulting limit is tighter than the policy asked for.
 
 ---
 
@@ -185,8 +190,10 @@ sudo service-limiter revert --config ./config --dry-run
 sudo service-limiter revert --config ./config --yes
 ```
 
-On Windows there is nothing to remove from disk: limits live in a Job Object
-held by the running process, so they lapse when that process exits.
+On Windows there is nothing to remove from disk: the limits live in a Job
+Object held by the durable holder process. `revert` stops that holder, which
+closes the handle and releases the limits. Its PID is recorded in the tool's
+home, so it is found even after the config directory is deleted.
 
 ### `service-limiter status --config DIR`
 

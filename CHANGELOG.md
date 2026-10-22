@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 ### Removed
 
+## [2.1.0-rc.2] - 2026-10-22
+
+Second pre-release. Fixes the Windows CPU limit being silently tighter than
+the policy, and makes `revert` work on Windows.
+
+### Added
+- `revert` now works on Windows. The durable holder's PID is recorded in the tool's home, and `revert` stops it, which closes the Job Object handle and releases the limits. Previously the only way to release them was to find the process by hand
+- `status` reports the Windows durable holder's PID, so it is visible which process is holding the limits
+
+### Fixed
+- The Windows CPU limit was silently tighter than the policy. The Win32 percentage CPU rate control cannot express more than one CPU, so on a multi-core machine a policy asking for more was clamped to 1 CPU with no warning. The clamp is now reported, so the operator knows the limit is tighter than they asked for
+
 ## [2.1.0-rc.1] - 2026-10-22
 
 Pre-release. Test it before it is promoted to a stable release.

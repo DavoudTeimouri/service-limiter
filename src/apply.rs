@@ -136,6 +136,46 @@ fn installed_path(service: &str) -> PathBuf {
     ))
 }
 
+/// Where the durable holder's PID is recorded, so `revert` can stop it.
+///
+/// Lives in the tool's home rather than the config directory: the holder
+/// outlives the staging tree, and `revert` must still find it after the user
+/// has deleted the config directory.
+fn holder_pid_path(service: &str) -> PathBuf {
+    crate::audit::home().join(format!("holder-{service}.pid"))
+}
+
+/// Stop the durable holder for a service, if one is running.
+///
+/// The holder is the process that holds the Job Object handle open. Killing
+/// it closes the handle, which is what releases the limits.
+fn stop_holder(service: &str) -> std::io::Result<bool> {
+    let path = holder_pid_path(service);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let pid = text.trim();
+    if pid.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(false);
+    }
+
+    let out = Command::new("taskkill")
+        .args(["/PID", pid, "/F"])
+        .output()
+        .map_err(|e| std::io::Error::other(format!("cannot run taskkill: {e}")))?;
+    let _ = fs::remove_file(&path);
+
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "could not stop holder process {pid}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    println!("stopped holder process {pid}; limits released");
+    Ok(true)
+}
+
 /// Remove installed limits for every staged service.
 ///
 /// `apply` is one-way: it writes a drop-in and restarts the unit, and nothing
@@ -163,12 +203,23 @@ pub fn revert(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Re
         }
 
         if cfg!(target_os = "windows") {
-            eprintln!(
-                "warning: {service}: Windows limits are held by a running process and \
-                 cannot be removed from disk. Stop the service-limiter process \
-                 that applied them."
-            );
-            out.skipped += 1;
+            // On Windows the limits live in a Job Object held by the durable
+            // holder process. Stopping it closes the handle and releases them.
+            match stop_holder(&service) {
+                Ok(true) => out.applied += 1,
+                Ok(false) => {
+                    eprintln!(
+                        "note: {service}: no durable holder is running, so no limits \
+                         to release. Windows limits also lapse on their own when \
+                         the holder exits."
+                    );
+                    out.skipped += 1;
+                }
+                Err(e) => {
+                    eprintln!("error: {service}: {e}");
+                    out.failed += 1;
+                }
+            }
             continue;
         }
 
@@ -258,7 +309,14 @@ pub fn status(config_dir: &Path) -> std::io::Result<Outcome> {
             .unwrap_or_default();
 
         if cfg!(target_os = "windows") {
-            println!("{service}: cannot be determined; Windows limits live in a Job Object");
+            let pid_file = holder_pid_path(&service);
+            match fs::read_to_string(&pid_file) {
+                Ok(text) => println!(
+                    "{service}: durable holder running, PID {} (stop it with 'revert')",
+                    text.trim()
+                ),
+                Err(_) => println!("{service}: no durable holder; Windows limits lapse with it"),
+            }
             continue;
         }
 
@@ -484,6 +542,19 @@ fn install_windows(service: &str, staged: &Path, durable: bool) -> std::io::Resu
         match wait_for_status(&status, std::time::Duration::from_secs(30)) {
             Some(line) if line.starts_with("OK:") => {
                 println!("{}", line.trim_start_matches("OK:"));
+                // Record the holder's PID so `revert` can stop it. Without
+                // this, the only way to release the limits was to find the
+                // process by hand.
+                let pid_file = holder_pid_path(service);
+                if let Some(parent) = pid_file.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::write(&pid_file, child.id().to_string()) {
+                    eprintln!(
+                        "warning: {service}: cannot record the holder PID at {}: {e}",
+                        pid_file.display()
+                    );
+                }
                 println!(
                     "Durable limits active. Holder process PID {}; stop it with \
                      'Stop-Process -Id {}' to release the limits.",
@@ -580,5 +651,15 @@ mod tests {
         let path = dir.path().join("status");
         std::fs::write(&path, "   \n").unwrap();
         assert!(wait_for_status(&path, std::time::Duration::from_millis(150)).is_none());
+    }
+
+    /// The holder PID must land in the tool's home, not the config
+    /// directory: the holder outlives the staging tree, and `revert` must
+    /// still find it after the config directory is deleted.
+    #[test]
+    fn holder_pid_path_is_in_the_tool_home() {
+        let path = holder_pid_path("sshd");
+        assert!(path.starts_with(crate::audit::home()), "{path:?}");
+        assert!(path.to_string_lossy().contains("sshd"), "{path:?}");
     }
 }

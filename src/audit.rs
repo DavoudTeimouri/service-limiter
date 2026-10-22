@@ -8,10 +8,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Where the log lives. `$SERVICE_LIMITER_HOME` overrides it, which also keeps
-/// tests off the developer's real home directory.
-pub fn log_path() -> PathBuf {
-    let base = std::env::var_os("SERVICE_LIMITER_HOME")
+/// The tool's home directory. `$SERVICE_LIMITER_HOME` overrides it, which
+/// also keeps tests off the developer's real home directory.
+pub fn home() -> PathBuf {
+    std::env::var_os("SERVICE_LIMITER_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var_os("HOME")
@@ -19,8 +19,12 @@ pub fn log_path() -> PathBuf {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             home.join(".service-limiter")
-        });
-    base.join("audit.log")
+        })
+}
+
+/// Where the log lives.
+pub fn log_path() -> PathBuf {
+    home().join("audit.log")
 }
 
 /// Append one event.

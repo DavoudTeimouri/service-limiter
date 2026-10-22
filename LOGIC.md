@@ -3,7 +3,7 @@
 Authoritative description of **how the tool works and why**. Written before the Rust
 rewrite so both implementations share one reference.
 
-**Status**: describes the Rust implementation (2.1.0-rc.1). The previous Python
+**Status**: describes the Rust implementation (2.1.0-rc.2). The previous Python
 implementation was 1.0.0; both are covered under
 [Compatibility contract](#9-compatibility-contract) and [MIGRATING.md](MIGRATING.md).
 
@@ -286,6 +286,14 @@ directives rather than emitting something systemd ignores.
 `generate` stages `Set-JobLimits.ps1`. `apply` runs it via `pwsh` (preferred) or
 `powershell`. Must be elevated.
 
+**The CPU rate control cannot express more than one CPU.** `CpuRate` is in
+units of 1/10000 of one CPU and the percentage form maxes out at 10000. The
+policy is a share of the whole machine, so on an N-core box it asks for
+`cpu_percent/100 * N` CPUs -- more than the control can express. The value is
+clamped to one CPU and the clamp is reported as a warning, because the limit
+that results is tighter than the operator asked for. Linux has no such
+ceiling: `CPUQuota` accepts values above 100%.
+
 The script `Add-Type`s a C# shim and P/Invokes `kernel32`:
 
 | API | Purpose |
@@ -369,8 +377,10 @@ second restore.
 installed, and whether a restorable backup exists. It needs no elevation: it
 only reads.
 
-On Windows neither applies: limits live in a Job Object held by the running
-process, so there is nothing on disk to revert and nothing to report.
+On Windows there is no file to restore. The limits live in a Job Object whose
+handle the durable holder process holds, so `revert` stops the holder instead.
+The holder's PID is written to `<tool home>/holder-<service>.pid` when it
+starts, so `revert` finds it even after the config directory is deleted.
 
 ### 5.2 Audit log
 
@@ -564,3 +574,4 @@ Claims **not** covered by a test, and how to verify by hand:
 | 7 | ~~`profiles/` duplicated at repo root~~ | redundant file; cleaned up | §6 |
 | 8 | The `--durable` holder does not survive a reboot | limits lapse until the holder is started again | a Windows Service or scheduled task would fix it |
 | 9 | Windows limits cover the main process, not pre-existing children | a child started before the Job Object assignment is not limited | children started *after* the assignment inherit the job |
+| 10 | The Windows CPU limit cannot exceed one CPU | on a multi-core machine the limit is tighter than the policy; now warned about | the Win32 percentage CPU rate control has no multi-CPU form |

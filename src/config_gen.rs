@@ -81,12 +81,27 @@ pub fn generate_linux_config(service: &ServiceDescriptor, policy: &Policy) -> Ge
 pub fn generate_windows_config(service: &ServiceDescriptor, policy: &Policy) -> GeneratedConfig {
     let mem_bytes = (policy.memory_mb as u64) * 1024 * 1024;
     let read_bytes = (policy.io_read_kbps as u64) * 1024;
-    // CpuRate is in units of 1/10000 of ONE CPU, and `cpu_percent` is a share of
-    // the whole machine, so scale by core count exactly as the systemd path does.
-    // 50% of a 4-core box is 200% of one core = 20000/10000.
+
+    // `cpu_percent` is a share of the whole machine; CpuRate is in units of
+    // 1/10000 of ONE cpu. So the policy allows `cpu_percent/100 * cores` cpus.
+    //
+    // The Win32 percentage CPU rate control cannot express more than one cpu
+    // (10000 is the maximum). A policy that asks for more than one cpu is
+    // therefore clamped, and the resulting limit is TIGHTER than the operator
+    // asked for. That is a platform limit, not a rounding detail, so it is
+    // reported rather than applied silently.
     let cores = crate::platform::cpu_count() as f64;
-    let quota = (policy.cpu_percent as f64 * cores).min(100.0);
-    let cpu_rate = ((quota * 100.0).round() as u64).min(10000);
+    let cpus = policy.cpu_percent as f64 / 100.0 * cores;
+    let cpu_rate = ((cpus * 10_000.0).round() as u64).clamp(1, 10_000);
+
+    let mut warnings = Vec::new();
+    if cpus > 1.0 {
+        warnings.push(format!(
+            "The policy allows {cpus:.1} CPUs, but the Windows CPU rate control \
+             cannot express more than one. The limit is set to 1 CPU, which is \
+             tighter than the policy asked for."
+        ));
+    }
 
     let content = include_str!("job_limits.ps1")
         .replace("{service}", &service.name)
@@ -98,7 +113,7 @@ pub fn generate_windows_config(service: &ServiceDescriptor, policy: &Policy) -> 
         content,
         file_path: format!("C:\\ServiceLimiter\\{}\\Set-JobLimits.ps1", service.name),
         directory: "C:\\ServiceLimiter".to_string(),
-        warnings: Vec::new(),
+        warnings,
     }
 }
 
@@ -293,7 +308,9 @@ mod tests {
     fn windows_cpu_rate_is_applied_and_clamped() {
         let cores = crate::platform::cpu_count() as f64;
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
-        let expected = ((50.0 * cores).min(100.0) * 100.0).round() as u64;
+        // 50% of the machine is `0.5 * cores` cpus, and CpuRate is 1/10000 of
+        // a cpu, capped at 10000 (one cpu).
+        let expected = ((0.5 * cores * 10_000.0).round() as u64).clamp(1, 10_000);
         assert!(
             s.contains(&format!("$cpu.CpuRate = {expected}")),
             "50% of {cores} cores should be {expected}, got:\n{s}"
@@ -306,6 +323,35 @@ mod tests {
         };
         let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &over).content;
         assert!(s.contains("$cpu.CpuRate = 10000"), "cpu rate not clamped");
+    }
+
+    /// A policy that asks for more than one CPU is clamped, and the clamp
+    /// makes the limit tighter than the operator asked for. That must be
+    /// reported, not applied silently.
+    #[test]
+    fn windows_warns_when_the_policy_exceeds_one_cpu() {
+        let cores = crate::platform::cpu_count() as f64;
+        // A 100% policy asks for the whole machine: `cores` CPUs.
+        let full = Policy {
+            cpu_percent: 100.0,
+            ..policy()
+        };
+        let cfg = generate_windows_config(&ServiceDescriptor::new("Spooler"), &full);
+        if cores > 1.0 {
+            assert!(
+                cfg.warnings.iter().any(|w| w.contains("one")),
+                "a {cores}-cpu machine needs the one-cpu cap reported, got: {:?}",
+                cfg.warnings
+            );
+        } else {
+            // One cpu: the control can express every policy, so there is
+            // nothing to report.
+            assert!(
+                cfg.warnings.is_empty(),
+                "a 1-cpu machine needs no warning, got: {:?}",
+                cfg.warnings
+            );
+        }
     }
 
     #[test]
