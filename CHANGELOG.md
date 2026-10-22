@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 ### Removed
 
+## [2.1.0-rc.3] - 2026-10-22
+
+Third pre-release. Adds machine-readable output.
+
+### Added
+- `analyze --json` emits the measurements, the policy and the violations as JSON, so the tool can be consumed by a monitoring pipeline or a script instead of only being read. The exit codes are unchanged: `0` clean, `1` over policy, `2` error
+
 ## [2.1.0-rc.2] - 2026-10-22
 
 Second pre-release. Fixes the Windows CPU limit being silently tighter than

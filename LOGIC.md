@@ -3,7 +3,7 @@
 Authoritative description of **how the tool works and why**. Written before the Rust
 rewrite so both implementations share one reference.
 
-**Status**: describes the Rust implementation (2.1.0-rc.2). The previous Python
+**Status**: describes the Rust implementation (2.1.0-rc.3). The previous Python
 implementation was 1.0.0; both are covered under
 [Compatibility contract](#9-compatibility-contract) and [MIGRATING.md](MIGRATING.md).
 

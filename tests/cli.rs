@@ -69,6 +69,38 @@ fn analyze_runs_without_panicking() {
     );
 }
 
+/// `analyze --json` must emit parseable JSON.
+///
+/// A monitoring tool that only prints prose cannot be consumed by anything
+/// else, so the measurements have to be available machine-readably.
+#[test]
+fn analyze_json_is_parseable() {
+    let out = run(&["analyze", "--json"]);
+    let c = code(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if c == 2 {
+        // Nothing measurable on this host (no systemd, or no services). The
+        // error path is covered by the exit-code contract.
+        assert!(
+            stdout.trim().is_empty(),
+            "a failed run must not print a report: {stdout}"
+        );
+        return;
+    }
+
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("analyze --json did not emit JSON: {e}\n{stdout}"));
+    for key in [
+        "discovered",
+        "profiled",
+        "over_policy",
+        "policy",
+        "profiles",
+    ] {
+        assert!(v.get(key).is_some(), "missing {key} in:\n{stdout}");
+    }
+}
+
 #[test]
 fn revert_and_status_are_registered_commands() {
     // A command that exists in the enum but is not wired to a handler would

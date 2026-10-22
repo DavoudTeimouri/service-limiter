@@ -11,6 +11,7 @@ mod platform;
 mod policy;
 mod profile;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -43,6 +44,9 @@ enum Command {
     Analyze {
         #[arg(long)]
         profile: Option<String>,
+        /// Emit JSON instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
     },
     /// Write configs for every service over the policy.
     Generate {
@@ -90,7 +94,7 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Analyze { profile } => analyze(profile.as_deref()),
+        Command::Analyze { profile, json } => analyze(profile.as_deref(), json),
         Command::Generate {
             profile,
             output,
@@ -122,7 +126,7 @@ fn resolve_policy(name: Option<&str>) -> Result<Policy, u8> {
     }
 }
 
-fn analyze(profile_name: Option<&str>) -> u8 {
+fn analyze(profile_name: Option<&str>, json: bool) -> u8 {
     let policy = match resolve_policy(profile_name) {
         Ok(p) => p,
         Err(code) => return code,
@@ -139,6 +143,44 @@ fn analyze(profile_name: Option<&str>) -> u8 {
         }
     };
 
+    // Zero measurable services means we could not actually do the job, which
+    // must not look like a clean run. Checked before any output, so a JSON
+    // consumer never gets a report that claims success.
+    if result.profiles.is_empty() {
+        eprintln!("error: no service could be profiled (no live MainPID, or needs root)");
+        audit::record(
+            "analyze",
+            &[
+                ("discovered", result.services.len().to_string()),
+                ("profiled", "0".to_string()),
+            ],
+        );
+        return exit::ERROR;
+    }
+
+    if json {
+        print_json(&result, &policy);
+    } else {
+        print_report(&result, &policy);
+    }
+
+    audit::record(
+        "analyze",
+        &[
+            ("discovered", result.services.len().to_string()),
+            ("profiled", result.profiles.len().to_string()),
+            ("over_policy", result.over_policy.len().to_string()),
+        ],
+    );
+    if result.over_policy.is_empty() {
+        exit::OK
+    } else {
+        exit::VIOLATION
+    }
+}
+
+/// The human-readable report.
+fn print_report(result: &orchestrator::Analysis, policy: &models::Policy) {
     println!(
         "Discovered {} services, profiled {}, {} over policy",
         result.services.len(),
@@ -155,7 +197,7 @@ fn analyze(profile_name: Option<&str>) -> u8 {
             let Some(p) = result.profiles.get(name) else {
                 continue;
             };
-            let (_, violations) = policy::evaluate(p, &policy);
+            let (_, violations) = policy::evaluate(p, policy);
             println!("  {name}:");
             for v in violations {
                 println!("    {v}");
@@ -175,33 +217,46 @@ fn analyze(profile_name: Option<&str>) -> u8 {
             p.service_name, p.cpu_percent, p.memory_mb, p.io_read_kbps, p.io_write_kbps
         );
     }
+}
 
-    // Zero measurable services means we could not actually do the job, which
-    // must not look like a clean run.
-    if result.profiles.is_empty() {
-        eprintln!("error: no service could be profiled (no live MainPID, or needs root)");
-        audit::record(
-            "analyze",
-            &[
-                ("discovered", result.services.len().to_string()),
-                ("profiled", "0".to_string()),
-            ],
-        );
-        return exit::ERROR;
-    }
-    audit::record(
-        "analyze",
-        &[
-            ("discovered", result.services.len().to_string()),
-            ("profiled", result.profiles.len().to_string()),
-            ("over_policy", result.over_policy.len().to_string()),
-        ],
-    );
-    if result.over_policy.is_empty() {
-        exit::OK
-    } else {
-        exit::VIOLATION
-    }
+/// The same data as JSON, for scripting and monitoring.
+///
+/// A monitoring tool that only prints prose cannot be consumed by anything
+/// else, so the measurements are also available machine-readably.
+fn print_json(result: &orchestrator::Analysis, policy: &models::Policy) {
+    let doc = json_doc(result, policy);
+    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+}
+
+/// The JSON document. Separate from the printing so it can be tested without
+/// a live systemd.
+fn json_doc(result: &orchestrator::Analysis, policy: &models::Policy) -> serde_json::Value {
+    let violations: BTreeMap<String, Vec<String>> = result
+        .over_policy
+        .iter()
+        .filter_map(|name| {
+            let p = result.profiles.get(name)?;
+            let (_, v) = policy::evaluate(p, policy);
+            Some((name.clone(), v))
+        })
+        .collect();
+
+    serde_json::json!({
+        "discovered": result.services.len(),
+        "profiled": result.profiles.len(),
+        "over_policy": result.over_policy.len(),
+        "policy": {
+            "name": policy.name,
+            "cpu_percent": policy.cpu_percent,
+            "memory_mb": policy.memory_mb,
+            "io_read_kbps": policy.io_read_kbps,
+            "io_write_kbps": policy.io_write_kbps,
+            "io_device": policy.io_device,
+        },
+        "violations": violations,
+        "services": result.services,
+        "profiles": result.profiles,
+    })
 }
 
 fn generate(
@@ -537,5 +592,86 @@ mod tests {
             "override.conf",
         );
         assert!(found.is_empty());
+    }
+
+    /// The JSON report must carry the measurements, the policy, and the
+    /// violations. A monitoring tool that only prints prose cannot be
+    /// consumed by anything else.
+    #[test]
+    fn json_report_carries_the_measurements() {
+        let policy = models::Policy {
+            name: "web-server".into(),
+            cpu_percent: 50.0,
+            memory_mb: 256.0,
+            io_read_kbps: 512.0,
+            io_write_kbps: 256.0,
+            io_device: None,
+        };
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "sshd".to_string(),
+            models::ResourceProfile {
+                service_name: "sshd".into(),
+                cpu_percent: 80.0,
+                cpu_percent_percore: 160.0,
+                memory_mb: 300.0,
+                io_read_kbps: 10.0,
+                io_write_kbps: 5.0,
+            },
+        );
+        let result = orchestrator::Analysis {
+            services: vec![models::ServiceDescriptor::new("sshd")],
+            profiles,
+            over_policy: vec!["sshd".to_string()],
+            configs: std::collections::BTreeMap::new(),
+        };
+
+        let doc = json_doc(&result, &policy);
+        assert_eq!(doc["discovered"], 1);
+        assert_eq!(doc["profiled"], 1);
+        assert_eq!(doc["over_policy"], 1);
+        assert_eq!(doc["policy"]["name"], "web-server");
+        assert_eq!(doc["policy"]["cpu_percent"], 50.0);
+        assert_eq!(doc["profiles"]["sshd"]["cpu_percent"], 80.0);
+        assert_eq!(doc["profiles"]["sshd"]["memory_mb"], 300.0);
+        // The violation must name the service and the metric that broke.
+        let v = &doc["violations"]["sshd"];
+        assert!(v.is_array(), "{doc}");
+        assert!(v[0].as_str().unwrap_or_default().contains("CPU"), "{doc}");
+    }
+
+    /// A service under the policy must not appear in the violations map.
+    #[test]
+    fn json_report_has_no_violations_for_healthy_services() {
+        let policy = models::Policy {
+            name: "p".into(),
+            cpu_percent: 50.0,
+            memory_mb: 256.0,
+            io_read_kbps: 512.0,
+            io_write_kbps: 256.0,
+            io_device: None,
+        };
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "quiet".to_string(),
+            models::ResourceProfile {
+                service_name: "quiet".into(),
+                cpu_percent: 1.0,
+                cpu_percent_percore: 4.0,
+                memory_mb: 10.0,
+                io_read_kbps: 1.0,
+                io_write_kbps: 1.0,
+            },
+        );
+        let result = orchestrator::Analysis {
+            services: vec![models::ServiceDescriptor::new("quiet")],
+            profiles,
+            over_policy: Vec::new(),
+            configs: std::collections::BTreeMap::new(),
+        };
+
+        let doc = json_doc(&result, &policy);
+        assert_eq!(doc["over_policy"], 0);
+        assert!(doc["violations"].as_object().unwrap().is_empty(), "{doc}");
     }
 }

@@ -128,7 +128,7 @@ resulting limit is tighter than the policy asked for.
 
 ## Commands
 
-### `service-limiter analyze [--profile NAME]`
+### `service-limiter analyze [--profile NAME] [--json]`
 
 Discovers services and measures them. Prints every measured service with its
 CPU, memory and I/O usage, and lists separately the ones over the policy with
@@ -137,6 +137,17 @@ the values that put them there.
 ```bash
 service-limiter analyze --profile web-server
 ```
+
+`--json` prints the same data as JSON instead, for scripts and monitoring
+pipelines:
+
+```bash
+service-limiter analyze --json | jq '.profiles | to_entries[] | select(.value.cpu_percent > 50)'
+```
+
+The JSON carries `discovered`, `profiled`, `over_policy`, the `policy` in
+force, a `violations` map keyed by service, and the `services` and `profiles`
+measurements. Exit codes are unchanged: `0` clean, `1` over policy, `2` error.
 
 ### `service-limiter generate --profile NAME [--output DIR] [--io-device PATH]`
 
