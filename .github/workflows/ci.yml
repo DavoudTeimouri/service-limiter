@@ -77,18 +77,48 @@ jobs:
             cp target/${{ matrix.target }}/release/service-limiter pkg/
           fi
           cp LICENSE README.md pkg/ 2>/dev/null || true
-          cd pkg
+          # The archive lands in the workspace root, next to the checksum.
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a ../${{ matrix.asset }} ./*
+            7z a "${{ matrix.asset }}" ./pkg/*
           else
-            tar -czf ../${{ matrix.asset }} .
+            tar -czf "${{ matrix.asset }}" -C pkg .
           fi
       - name: Checksum
         shell: bash
         run: sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          # The release body is the changelog section for this tag, never the
+          # whole file and never GitHub's auto-generated notes.
+          #
+          # index(), not a regex: the awk program below is inside single
+          # quotes, so "\[" is an escaped backslash followed by an unclosed
+          # character class and awk refuses to parse it.
+          SECTION="$(awk -v tag="${GITHUB_REF_NAME#v}" '
+            index($0, "## [" tag "]") == 1 { found=1 }
+            found && index($0, "## [") == 1 && index($0, "## [" tag "]") != 1 { exit }
+            found { print }
+          ' CHANGELOG.md)"
+          if [ -z "$SECTION" ]; then
+            echo "::error::No '## [${GITHUB_REF_NAME#v}]' section in CHANGELOG.md"
+            exit 1
+          fi
+          # Safe: "$SECTION" is a variable, so the backticks in the changelog
+          # are never re-evaluated by the shell.
+          printf '%s\n' "$SECTION" > RELEASE_NOTES.md
+          # A tag with a pre-release suffix publishes as a pre-release. Every
+          # version goes out as a pre-release first and is promoted to stable
+          # only after it has been tested.
+          if printf '%s' "${GITHUB_REF_NAME#v}" | grep -Eq -- '-(rc|beta|alpha)[0-9.]*$'; then
+            echo "PRERELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "PRERELEASE=false" >> "$GITHUB_ENV"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ env.PRERELEASE }}
           files: |
             ${{ matrix.asset }}
             ${{ matrix.asset }}.sha256

@@ -268,9 +268,27 @@ limit because of it is worse.
 - **"systemctl not found"** - this host does not run systemd, which Linux support requires.
 - **Exit 2 from `analyze`** - no service could be profiled. Either no live MainPID, or reading process stats needs root.
 - **"Profile not found"** - the error lists the available names.
-- **I/O limits missing from the drop-in** - your profile has no `io_device`, and systemd needs a block device path per limit.
+- **I/O limits missing from the drop-in** - your profile has no `io_device`, and systemd needs a block device path per limit. Set one with `--io-device /dev/sda1`.
 - **"AssignProcessToJobObject failed" on Windows** - the service is probably already inside a job object, common under IIS or a service host.
-- **Windows limits vanish** - expected, use `--durable`.
+- **Windows limits vanish** - the Job Object handle closed with the script. Use `--durable` to keep a holder process alive.
+
+---
+
+## Releases
+
+Every version ships as a **pre-release first**. It is published, tested, and only
+promoted to a stable release once it has been confirmed to work.
+
+| Stage | Tag | GitHub |
+|---|---|---|
+| Pre-release | `v2.1.0-rc.1` | marked *Pre-release* |
+| Stable | `v2.1.0` | marked *Latest release* |
+
+The release body is the matching `## [X.Y.Z]` section of
+[CHANGELOG.md](CHANGELOG.md), extracted by
+[`scripts/extract_changelog.py`](scripts/extract_changelog.py), so the notes and
+the changelog can never drift apart. A tag with no changelog section fails the
+release build rather than publishing an empty body.
 
 ---
 

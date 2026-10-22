@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+### Changed
+### Fixed
+### Removed
+
+## [2.1.0-rc.1] - 2026-10-22
+
+Pre-release. Test it before it is promoted to a stable release.
+
+### Added
 - `--durable` now works on Windows. The Job Object limits used to lapse the moment the apply script exited, because the handle closed with it. The script now takes a `-Durable` switch that keeps the handle open, and `apply` keeps that holder process alive and prints its PID. The script also writes a status file, because in durable mode it never exits and its exit code can never be waited for -- without that, a failed apply would have been reported as a success
 - `generate --io-device PATH`: sets the block device for the I/O bandwidth limits without editing the profile. A path that does not exist is refused, because systemd ignores a limit on a missing device and the drop-in would install cleanly while enforcing nothing
 - `service-limiter revert --config DIR`: undoes an `apply`. Restores the `.bak` that `apply` wrote, or deletes the drop-in when there was no original, then reloads systemd and restarts the unit. Supports `--dry-run` and `--yes`
