@@ -36,6 +36,8 @@ Pre-release. Test it before it is promoted to a stable release.
 - The audit log's JSON escaping uses `serde_json` instead of a hand-rolled escaper, which is where a JSON-injection bug hides. The key order is unchanged
 
 ### Fixed
+- `apply --dry-run` and `revert --dry-run` demanded root. A dry run changes nothing, so it must not need privileges; requiring sudo to preview a change is the wrong contract and made the preview unusable from a normal shell
+- `apply --dry-run` did not validate the staged config. It now runs the same `systemd-analyze` gate as a real apply and names the offending key, so a broken config is reported before it is installed rather than after
 - `apply` ignored `systemctl`'s exit code, so a failed `daemon-reload` or `restart` was reported as "restarted {service}". Both are now checked and a non-zero exit fails the service
 - `apply` overwrote the existing `override.conf.bak` on every run, so a second `apply` destroyed the only copy of the original config. An existing backup is now left untouched
 - The `systemd-analyze` validation gate reported "systemd rejected this config" even when the real cause was that `systemd-analyze` was not installed. The two cases are now distinguished

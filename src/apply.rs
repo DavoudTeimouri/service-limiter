@@ -75,8 +75,25 @@ pub fn run(
         }
 
         if dry_run {
-            println!("[DRY-RUN] would apply {service} from {}", staged.display());
-            out.applied += 1;
+            // A dry run still reports a config systemd would reject, so the
+            // user learns their config is broken before running for real.
+            match validate_staged(&staged, filename) {
+                Ok(()) => {
+                    println!("[DRY-RUN] would apply {service} from {}", staged.display());
+                    out.applied += 1;
+                }
+                Err(VerifyError::Rejected(reason)) => {
+                    eprintln!("error: {service}: {reason}");
+                    out.failed += 1;
+                }
+                Err(VerifyError::Unavailable(reason)) => {
+                    // The validator is missing, not the config. That is worth
+                    // a warning, not a failure.
+                    eprintln!("warning: {service}: {reason}");
+                    println!("[DRY-RUN] would apply {service} from {}", staged.display());
+                    out.applied += 1;
+                }
+            }
             continue;
         }
 
@@ -296,11 +313,11 @@ fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
 
     // Validate BEFORE touching /etc. systemd ignores unknown keys silently, so
     // a bad directive would install cleanly and do nothing.
-    if let Err(failure) = verify_with_systemd_analyze(&content) {
+    if let Err(failure) = validate_staged(staged, "override.conf") {
         eprintln!("error: refusing {service}: {failure}");
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            failure,
+            failure.to_string(),
         ));
     }
 
@@ -351,26 +368,58 @@ fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Ask systemd whether it understands every line, by verifying a probe unit.
+/// Why a staged config did not validate.
 ///
-/// Returns a human-readable reason on failure: either that systemd rejected
-/// the content, or that the validator itself could not run. Those are
-/// different problems and must not be reported the same way -- "systemd
-/// rejected this config" is wrong and misleading when the real cause is that
+/// The two cases are different problems and must not be reported the same
+/// way: "systemd rejected this config" is wrong when the real cause is that
 /// `systemd-analyze` is not installed.
-fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
+#[derive(Debug)]
+pub enum VerifyError {
+    /// systemd understood the config and refused it.
+    Rejected(String),
+    /// The validator itself could not run.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerifyError::Rejected(m) | VerifyError::Unavailable(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+/// Check a staged config before it is installed.
+///
+/// Only the systemd drop-in can be checked this way; the Windows script is
+/// validated by PowerShell when it runs.
+fn validate_staged(staged: &Path, filename: &str) -> Result<(), VerifyError> {
+    if filename != "override.conf" {
+        return Ok(());
+    }
+    let content = fs::read_to_string(staged)
+        .map_err(|e| VerifyError::Unavailable(format!("cannot read {}: {e}", staged.display())))?;
+    verify_with_systemd_analyze(&content)
+}
+
+/// Ask systemd whether it understands every line, by verifying a probe unit.
+fn verify_with_systemd_analyze(content: &str) -> Result<(), VerifyError> {
     let mut probe = tempfile::NamedTempFile::with_suffix(".service")
-        .map_err(|e| format!("cannot create probe file: {e}"))?;
+        .map_err(|e| VerifyError::Unavailable(format!("cannot create probe file: {e}")))?;
     probe
         .write_all(b"[Service]\nExecStart=/bin/true\n")
         .and_then(|()| probe.write_all(content.as_bytes()))
-        .map_err(|e| format!("cannot write probe file: {e}"))?;
+        .map_err(|e| VerifyError::Unavailable(format!("cannot write probe file: {e}")))?;
 
     let out = Command::new("systemd-analyze")
         .arg("verify")
         .arg(probe.path())
         .output()
-        .map_err(|e| format!("cannot run systemd-analyze to validate the config: {e}"))?;
+        .map_err(|e| {
+            VerifyError::Unavailable(format!(
+                "cannot run systemd-analyze to validate the config: {e}"
+            ))
+        })?;
 
     let text = String::from_utf8_lossy(&out.stderr);
     let problems: Vec<String> = text
@@ -382,10 +431,10 @@ fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
     if problems.is_empty() {
         Ok(())
     } else {
-        Err(format!(
+        Err(VerifyError::Rejected(format!(
             "systemd rejected this config:\n  {}",
             problems.join("\n  ")
-        ))
+        )))
     }
 }
 

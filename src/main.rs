@@ -327,8 +327,11 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
         return exit::ERROR;
     }
 
+    // A dry run changes nothing, so it must not need root. Requiring sudo to
+    // preview a change is the wrong contract, and it made `apply --dry-run`
+    // unusable from a normal shell.
     #[cfg(unix)]
-    if unsafe { libc::geteuid() } != 0 {
+    if !dry_run && unsafe { libc::geteuid() } != 0 {
         eprintln!("error: apply needs root: re-run with sudo.");
         return exit::NEEDS_ROOT;
     }
@@ -411,8 +414,9 @@ fn revert(config: &std::path::Path, dry_run: bool, yes: bool) -> u8 {
         return exit::ERROR;
     }
 
+    // A dry run changes nothing, so it must not need root.
     #[cfg(unix)]
-    if unsafe { libc::geteuid() } != 0 {
+    if !dry_run && unsafe { libc::geteuid() } != 0 {
         eprintln!("error: revert needs root: re-run with sudo.");
         return exit::NEEDS_ROOT;
     }

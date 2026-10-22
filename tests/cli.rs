@@ -252,8 +252,15 @@ fn apply_rejects_a_config_systemd_would_ignore() {
     )
     .unwrap();
 
-    let out = run(&["apply", "--config", dir.path().to_str().unwrap(), "--yes"]);
-    // Either it is refused (3) or it fails the apply (2); it must never report success.
+    // --dry-run, not a real apply: a dry run needs no root, so this test
+    // works on a CI runner that is not root, and it still exercises the
+    // validation gate because a dry run validates too.
+    let out = run(&[
+        "apply",
+        "--config",
+        dir.path().to_str().unwrap(),
+        "--dry-run",
+    ]);
     assert_ne!(code(&out), 0, "must not silently accept an invalid drop-in");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
