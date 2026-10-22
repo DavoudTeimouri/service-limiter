@@ -87,7 +87,6 @@ fn profile_services(services: &[ServiceDescriptor]) -> BTreeMap<String, Resource
             eprintln!("skipping {name}: could not sample pid {pid}");
             continue;
         };
-        let secs = sample.elapsed_secs;
         out.insert(
             name.clone(),
             ResourceProfile {
@@ -95,8 +94,8 @@ fn profile_services(services: &[ServiceDescriptor]) -> BTreeMap<String, Resource
                 cpu_percent: sample.cpu_percent / cores,
                 cpu_percent_percore: sample.cpu_percent,
                 memory_mb: sample.rss_bytes as f64 / 1024.0 / 1024.0,
-                io_read_kbps: sample.read_bytes as f64 / 1024.0 / secs,
-                io_write_kbps: sample.write_bytes as f64 / 1024.0 / secs,
+                io_read_kbps: sample.read_bps / 1024.0,
+                io_write_kbps: sample.write_bps / 1024.0,
             },
         );
     }

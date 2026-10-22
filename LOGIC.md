@@ -117,11 +117,20 @@ pub fn sample_trees(roots: &[u32], interval: Duration) -> HashMap<u32, Sample>
 2. Sleep `interval` (default **250 ms**).
 3. Refresh again and diff.
 
-**One window for all services**: sampling each tree separately cost a full
-process-table scan and a sleep per service, so profiling 50 services spent over
-12 seconds asleep. One shared window costs 2 scans and 1 sleep regardless of
-service count. The trade-off is that every tree is measured over the same
-window, so their numbers are directly comparable.
+**Several windows, worst one wins**: one 250 ms window misses a service that
+spikes between samples. The sampler takes several windows and reports the
+*worst* of them, not the average: averaging would average away a sustained
+spike, and a service that bursts would slip under the policy.
+
+**One window shared by all services**: sampling each tree separately cost a
+full process-table scan and a sleep per service, so profiling 50 services
+spent over 12 seconds asleep. One shared window costs 2 scans and 1 sleep
+regardless of service count. The trade-off is that every tree is measured over
+the same window, so their numbers are directly comparable.
+
+**Rates, not raw counts**: each window has a slightly different length, so
+the sample stores bytes per second rather than raw byte counts. Comparing raw
+counts across windows would compare different spans.
 
 **Why prime first**: `cpu_usage()` and `disk_usage()` are deltas between
 refreshes. The first call establishes the baseline; a single call returns
@@ -282,14 +291,21 @@ read/write transfer caps via `IoInfo`. Service PID resolved with
 > (`Get-Job` exists but is an unrelated PowerShell background job.)
 > → `config_gen::tests::windows_script_has_no_invented_cmdlets`, `config_gen::tests::windows_memory_flag_is_the_real_one`
 
-**Known weak enforcement — unresolved.** A Job Object limit **lapses when its handle is
-released**, and the script exits. The generated script says so itself. Also, if the
-service already runs inside a job object (common under IIS or a service host),
-`AssignProcessToJobObject` fails and only a warning is emitted.
+**Known weak enforcement.** A Job Object limit **lapses when its handle is
+released**. The script exits after applying, so without `--durable` the limits
+are transient. With `--durable` the script keeps running and holding the
+handle, and the tool prints the holder's PID so it can be stopped. The holder
+does not survive a reboot.
 
-Durable options, none implemented: a long-running broker that holds the handle, a service
-wrapper that owns the lifetime, or scheduled re-apply. Any Rust rewrite should pick one
-explicitly rather than emit a one-shot script.
+Also, if the service already runs inside a job object (common under IIS or a
+service host), `AssignProcessToJobObject` fails; the script records that as an
+error status and exits 2, so the apply is reported as a failure rather than
+silently doing nothing.
+
+The holder-process approach was chosen over a Windows Service or a scheduled
+task because it needs no registration and no privileges beyond the apply
+itself. It is the weakest of the three, and a release that needs the limits to
+survive a reboot should move to one of the others.
 
 ---
 
@@ -468,8 +484,9 @@ belonging in `2.0.0` with a CHANGELOG entry.
 7. Zero measurable services exits `2`.
 
 **Deliberately changed in 2.0.0**: install method (`pip` → `cargo install` /
-release binary), TUI removed, `--durable` not yet implemented, audit log not yet
-implemented. See [MIGRATING.md](MIGRATING.md).
+release binary), TUI removed. `--durable` and the audit log were not yet
+implemented in 2.0.0; both have since landed. See
+[MIGRATING.md](MIGRATING.md).
 
 ---
 
@@ -523,10 +540,11 @@ Claims **not** covered by a test, and how to verify by hand:
 | # | Problem | Impact | Notes |
 |---|---|---|---|
 | 1 | ~~`CPUQuota` per-CPU vs whole-machine `cpu_percent`~~ | **fixed in 2.0.1**, both sides now normalized | §3.1 |
-| 2 | Windows Job Object limits lapse when the script exits | enforcement is transient | §4.2 |
-| 3 | I/O limits need a device path, so profiles without `io_device` get none | I/O silently unenforced | §4.1 |
-| 4 | Single-interval sampling | misses short spikes | §2.3 |
+| 2 | ~~Windows Job Object limits lapse when the script exits~~ | **fixed**: `--durable` keeps a holder process alive holding the handle | §4.2 |
+| 3 | I/O limits need a device path, so profiles without `io_device` get none | I/O silently unenforced. `--io-device` sets it without editing the profile | §4.1 |
+| 4 | ~~Single-interval sampling~~ | **fixed**: several windows, worst one reported | §2.3 |
 | 5 | ~~No `revert` / `status` command~~ | **fixed**: `revert` restores the backup or removes the drop-in, `status` reports what is installed | §5.3 |
-| 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host | needs a Windows runner |
+| 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host. The apply path is now compiled on Linux too, so it is type-checked; only its *runtime* behaviour needs a Windows host | needs a Windows runner |
 | 7 | ~~`profiles/` duplicated at repo root~~ | redundant file; cleaned up | §6 |
-| 8 | `--durable` not yet implemented | Windows limits lapse; use --durable to hold the handle (supervised process coming later) | MIGRATING.md |
+| 8 | The `--durable` holder does not survive a reboot | limits lapse until the holder is started again | a Windows Service or scheduled task would fix it |
+| 9 | Windows limits cover the main process, not pre-existing children | a child started before the Job Object assignment is not limited | children started *after* the assignment inherit the job |

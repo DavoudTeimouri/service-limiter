@@ -243,6 +243,33 @@ mod tests {
         }
     }
 
+    /// The script must support the durable mode and report its outcome
+    /// through a status file, because in durable mode it never exits and its
+    /// exit code can never be waited for.
+    #[test]
+    fn windows_script_supports_durable_mode() {
+        let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
+        assert!(s.contains("-Durable"), "no -Durable switch");
+        assert!(s.contains("-StatusFile"), "no -StatusFile parameter");
+        assert!(s.contains("Write-Status"), "no status reporting");
+        // It must keep the handle open rather than exiting.
+        assert!(
+            s.contains("Start-Sleep"),
+            "durable mode must hold the handle open, not exit"
+        );
+    }
+
+    /// The script must not swallow failures: every exit path has to record
+    /// an error, otherwise a failed apply looks like a success.
+    #[test]
+    fn windows_script_reports_failures() {
+        let s = generate_windows_config(&ServiceDescriptor::new("Spooler"), &policy()).content;
+        assert!(
+            s.contains("ERROR:"),
+            "no error status on failure paths"
+        );
+    }
+
     #[test]
     fn windows_memory_flag_is_the_real_one() {
         // 0x20 is PRIORITY_CLASS, 0x400 is DIE_ON_UNHANDLED_EXCEPTION.

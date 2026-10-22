@@ -103,22 +103,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Minimal JSON string escaping. Values here are paths and service names, but
 /// a service name could contain a quote or a backslash, so escape properly.
+///
+/// The escaping is serde_json's, not hand-rolled: a hand-rolled escaper is
+/// exactly where a JSON-injection bug hides. serde_json is already a
+/// dependency, so this costs nothing.
+///
+/// The object is assembled by hand rather than with `serde_json::json!`
+/// because that macro sorts keys alphabetically, and the log is read by
+/// humans and greps that expect `event` first.
 fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    // A &str is always serializable, so this cannot fail.
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 #[cfg(test)]

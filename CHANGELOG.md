@@ -7,23 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- `--durable` now works on Windows. The Job Object limits used to lapse the moment the apply script exited, because the handle closed with it. The script now takes a `-Durable` switch that keeps the handle open, and `apply` keeps that holder process alive and prints its PID. The script also writes a status file, because in durable mode it never exits and its exit code can never be waited for -- without that, a failed apply would have been reported as a success
+- `generate --io-device PATH`: sets the block device for the I/O bandwidth limits without editing the profile. A path that does not exist is refused, because systemd ignores a limit on a missing device and the drop-in would install cleanly while enforcing nothing
 - `service-limiter revert --config DIR`: undoes an `apply`. Restores the `.bak` that `apply` wrote, or deletes the drop-in when there was no original, then reloads systemd and restarts the unit. Supports `--dry-run` and `--yes`
 - `service-limiter status --config DIR`: shows which staged services currently have limits installed and whether a restorable backup exists
 - `analyze` now prints the measured CPU, memory and I/O for every service, and lists the services over the policy separately with the values that put them there. It previously printed only the first five service names with no measurements, so the user could not tell which services were the problem
 - Audit log restored in the Rust build: JSONL at `~/.service-limiter/audit.log`, covering `analyze`, `generate`, `apply`, and the failure paths `analyze_error`, `generate_error`, `apply_error`, `apply_denied`. Failed runs are recorded, not just successful ones. `SERVICE_LIMITER_HOME` relocates it. Values are JSON-escaped so a crafted service name cannot forge a line
 - `ResourceProfile.cpu_percent_percore`: the raw per-core figure, alongside the normalized machine share
+- A docs-freshness test fails the build when README.md or LOGIC.md names a `platform::` symbol that no longer exists, or when a CLI subcommand is not documented
 
 ### Changed
-- All services are measured over ONE shared sampling window. Sampling each service separately cost a full process-table scan and a sleep per service, so profiling 50 services spent over 12 seconds asleep
+- Services are measured over several sampling windows instead of one, and the reported figure is the worst window rather than the average. A single 250 ms window missed short spikes, and averaging would have averaged away a sustained one
+- All services share each sampling window. Sampling each service separately cost a full process-table scan and a sleep per service, so profiling 50 services spent over 12 seconds asleep
 - Service PIDs are resolved in one batch (`systemctl show` with all units, or one CIM query) instead of one process per service. On Windows this removed a PowerShell startup per service, which cost hundreds of milliseconds each
 - `cpu_percent` is now a consistent whole-machine share. Both the measurement (divided by core count) and the generated limits (multiplied by it) are normalized, so the limit matches the policy that produced it
 - `generate` removes staged configs for services that are no longer over the policy. Leaving them behind meant `apply` kept installing limits for a service that had come back under the limit. Files this tool did not create are never touched
+- The Windows apply path is now compiled on every platform, not just Windows. It is plain `std::process`, so building it on Linux type-checks it in CI, where it was previously never compiled at all
+- The audit log's JSON escaping uses `serde_json` instead of a hand-rolled escaper, which is where a JSON-injection bug hides. The key order is unchanged
 
 ### Fixed
 - `apply` ignored `systemctl`'s exit code, so a failed `daemon-reload` or `restart` was reported as "restarted {service}". Both are now checked and a non-zero exit fails the service
 - `apply` overwrote the existing `override.conf.bak` on every run, so a second `apply` destroyed the only copy of the original config. An existing backup is now left untouched
 - The `systemd-analyze` validation gate reported "systemd rejected this config" even when the real cause was that `systemd-analyze` was not installed. The two cases are now distinguished
 - The test that asserts an invalid drop-in is rejected passed for the wrong reason when `systemd-analyze` was missing, and did not check that the offending key was named. Both are fixed
+- The process-tree walk used a `Vec` for its visited set, making it quadratic in the size of the process table. It is now a `HashSet`
+- The Windows documentation claimed that only the main PID was measured. The measurement walks the full child tree on both platforms; what differs is which processes the *limit* covers
 - CPU limits were far tighter than the policy that set them: `CPUQuota={cpu_percent}%` was emitted while `cpu_percent` read as a whole-machine share, but systemd measures `CPUQuota` per-CPU. On a 32-core host a `50` policy throttled a service to 1.6% of the machine. Windows `CpuRate` had the same mismatch. Core count comes from `available_parallelism()`, which respects the cgroup CPU quota, so a container capped at 1 CPU scales correctly instead of emitting a quota the cgroup can never grant
 
 ### Removed

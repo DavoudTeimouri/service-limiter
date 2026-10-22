@@ -7,7 +7,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use std::process::Command;
-#[cfg(target_os = "windows")]
 use std::process::Stdio;
 
 /// What happened, so main can map it to an exit code.
@@ -25,7 +24,17 @@ impl Outcome {
 }
 
 /// Apply `<config>/<service>/<file>` for the current platform.
-pub fn run(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Result<Outcome> {
+///
+/// `durable` keeps the limits in place after the tool exits. On Linux that is
+/// already true (systemd owns the limit), so it is a no-op there. On Windows
+/// the limits live in a Job Object whose handle the process holds, so it
+/// means "keep a holder process alive".
+pub fn run(
+    config_dir: &Path,
+    dry_run: bool,
+    assume_yes: bool,
+    durable: bool,
+) -> std::io::Result<Outcome> {
     // cfg-gated per OS rather than a fn-pointer table: one target is compiled
     // at a time, so there is nothing to dispatch on at runtime.
     #[cfg(target_os = "linux")]
@@ -78,9 +87,14 @@ pub fn run(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Resul
         }
 
         #[cfg(target_os = "linux")]
-        let installed = install_linux(&service, &staged);
+        let installed = {
+            // --durable is a Windows concern: systemd owns the limit and it
+            // persists on its own.
+            let _ = durable;
+            install_linux(&service, &staged)
+        };
         #[cfg(target_os = "windows")]
-        let installed = install_windows(&service, &staged);
+        let installed = install_windows(&service, &staged, durable);
 
         match installed {
             Ok(true) => out.applied += 1,
@@ -377,8 +391,13 @@ fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn install_windows(service: &str, staged: &Path) -> std::io::Result<bool> {
+/// Apply the Job Object limits to a Windows service.
+///
+/// Not `#[cfg(target_os = "windows")]`: the body is plain `std::process`,
+/// so compiling it everywhere means the Windows path is type-checked by the
+/// Linux build and CI. It only *runs* on Windows.
+#[allow(dead_code)]
+fn install_windows(service: &str, staged: &Path, durable: bool) -> std::io::Result<bool> {
     // Prefer pwsh (PowerShell 7+); fall back to the deprecated 5.1 host.
     let shell = ["pwsh", "powershell"]
         .into_iter()
@@ -393,19 +412,127 @@ fn install_windows(service: &str, staged: &Path) -> std::io::Result<bool> {
         })
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no PowerShell found"))?;
 
-    let out = Command::new(shell)
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(staged)
-        .output()?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(
-            String::from_utf8_lossy(&out.stderr).into_owned(),
+    if durable {
+        // The script must stay alive to hold the Job Object handle, so it can
+        // never be waited on. It reports through a status file instead, and
+        // that is the only way to know whether it worked.
+        let status = std::env::temp_dir().join(format!(
+            "service-limiter-{}-{}.status",
+            std::process::id(),
+            service
         ));
+        let _ = fs::remove_file(&status);
+
+        let child = Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(staged)
+            .arg("-Durable")
+            .arg("-StatusFile")
+            .arg(&status)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        // Without this the call would report success even if the script
+        // failed to apply anything.
+        match wait_for_status(&status, std::time::Duration::from_secs(30)) {
+            Some(line) if line.starts_with("OK:") => {
+                println!("{}", line.trim_start_matches("OK:"));
+                println!(
+                    "Durable limits active. Holder process PID {}; stop it with \
+                     'Stop-Process -Id {}' to release the limits.",
+                    child.id(),
+                    child.id()
+                );
+                Ok(true)
+            }
+            Some(line) => Err(std::io::Error::other(line)),
+            None => Err(std::io::Error::other(format!(
+                "{service}: timed out waiting for the Job Object limits to be applied"
+            ))),
+        }
+    } else {
+        let out = Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(staged)
+            .output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
+        }
+        println!("{}", String::from_utf8_lossy(&out.stdout).trim());
+        eprintln!(
+            "warning: Job Object limits lapse when the script exits. Use --durable to keep them."
+        );
+        let _ = service;
+        Ok(true)
     }
-    println!("{}", String::from_utf8_lossy(&out.stdout).trim());
-    eprintln!(
-        "warning: Job Object limits lapse when the script exits. Use --durable to keep them."
-    );
-    let _ = service;
-    Ok(true)
+}
+
+/// Wait for a status file to appear and return its first line.
+///
+/// The file is written by the PowerShell script. Polling is used because the
+/// script may never exit in durable mode, so its exit code is not available.
+fn wait_for_status(path: &Path, timeout: std::time::Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Some(line) = text.lines().next() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    return Some(line.to_string());
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The status file is the only way to learn the outcome in durable mode,
+    /// so reading it has to work.
+    #[test]
+    fn wait_for_status_reads_the_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status");
+        std::fs::write(&path, "OK: Applied memory=100B\n").unwrap();
+
+        let line = wait_for_status(&path, std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(line, "OK: Applied memory=100B");
+    }
+
+    /// An error line must come back as an error, not as a success.
+    #[test]
+    fn wait_for_status_reports_errors_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status");
+        std::fs::write(&path, "ERROR: Service not running\n").unwrap();
+
+        let line = wait_for_status(&path, std::time::Duration::from_secs(1)).unwrap();
+        assert!(line.starts_with("ERROR:"), "{line}");
+    }
+
+    /// A file that never appears must time out, not hang forever.
+    #[test]
+    fn wait_for_status_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("never-written");
+        assert!(wait_for_status(&path, std::time::Duration::from_millis(150)).is_none());
+    }
+
+    /// An empty file is not a result yet; keep waiting.
+    #[test]
+    fn wait_for_status_ignores_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status");
+        std::fs::write(&path, "   \n").unwrap();
+        assert!(wait_for_status(&path, std::time::Duration::from_millis(150)).is_none());
+    }
 }

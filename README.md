@@ -99,24 +99,25 @@ On Windows, run an **elevated** terminal instead of using `sudo`.
 | Capability | Linux (systemd, x64/arm64) | Windows (10/11, x64) |
 |---|---|---|
 | Discovery | `systemctl list-units` | `Get-CimInstance Win32_Service` |
-| Profiling | main PID + **full child tree** | main PID (children not walked) |
+| Profiling | main PID + **full child tree** | main PID + **full child tree** |
 | CPU limit | `CPUQuota`, per **single** CPU | Job Object `CpuRate` |
 | Memory limit | `MemoryMax` | Job Object `JOB_OBJECT_LIMIT_JOB_MEMORY` |
-| I/O limit | `IOReadBandwidthMax`, only when the profile has `io_device` | Job Object I/O rate control |
-| Durable | **Yes**, systemd owns the drop-in | **No by default**, see below |
+| I/O limit | `IOReadBandwidthMax`, only when an `io_device` is known | Job Object I/O rate control |
+| Durable | **Yes**, systemd owns the drop-in | **Yes** with `--durable`, see below |
 | macOS / BSD | unsupported | unsupported |
 
 **Windows limits are not durable by default.** A Job Object's limits live only while a
 handle to it is open. `apply` runs a one-shot script, so its limits lapse when the
-script exits, and a service restart drops them entirely. Use `--durable` to keep a
-process alive holding the handle:
+script exits, and a service restart drops them entirely. With `--durable` the tool
+keeps a holder process alive holding the handle, and prints its PID:
 
 ```powershell
 service-limiter apply --config .\config --yes --durable
 ```
 
-Windows has no supported native per-service Job Object limit surface, so this is a
-holder-process workaround rather than a real fix. See [LOGIC.md](LOGIC.md).
+The holder does not survive a reboot. Making it survive would need a Windows
+Service or a scheduled task, which this tool does not create. See
+[LOGIC.md](LOGIC.md).
 
 ---
 
@@ -132,7 +133,7 @@ the values that put them there.
 service-limiter analyze --profile web-server
 ```
 
-### `service-limiter generate --profile NAME [--output DIR]`
+### `service-limiter generate --profile NAME [--output DIR] [--io-device PATH]`
 
 Writes configs for every service over the policy.
 
@@ -148,6 +149,15 @@ Staged configs for services that are no longer over the policy are removed, so
 a service that comes back under the limit stops being limited on the next
 `apply`. Files this tool did not create are never touched.
 
+| Flag | Effect |
+|---|---|
+| `--io-device PATH` | block device for the I/O bandwidth limits, e.g. `/dev/sda1`; overrides the profile's `io_device` |
+
+systemd's I/O limits are per-device, so a profile without `io_device` gets no
+I/O limits at all. `--io-device` sets one without editing the profile. A path
+that does not exist is refused: systemd ignores a limit on a missing device, so
+a typo would install cleanly and enforce nothing.
+
 ### `service-limiter apply --config DIR [--dry-run] [--yes] [--durable]`
 
 Installs staged configs.
@@ -156,7 +166,7 @@ Installs staged configs.
 |---|---|
 | `--dry-run` | print what would happen, change nothing |
 | `--yes` | skip the per-service confirmation |
-| `--durable` | Windows only, hold the Job Object handle open |
+| `--durable` | Windows only: keep a holder process alive so the limits persist |
 
 On Linux, in order: verify the drop-in with `systemd-analyze verify` (**before**
 touching `/etc`), back up any existing `override.conf` to `.bak`, then

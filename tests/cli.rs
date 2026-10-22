@@ -50,6 +50,26 @@ fn help_and_version_work() {
     assert_eq!(code(&run(&["--version"])), 0);
 }
 
+/// `analyze` must run on every platform without panicking.
+///
+/// On the Windows CI runner this exercises the real CIM discovery path and
+/// the Windows process measurement, which no other test reaches. The Windows
+/// code is compiled on Linux (it is plain `std::process`), but it is only
+/// *run* there.
+///
+/// Exit codes: 0 clean, 1 over policy, 2 nothing measurable. Anything above
+/// 2 is a panic (101) or a crash.
+#[test]
+fn analyze_runs_without_panicking() {
+    let out = run(&["analyze"]);
+    let c = code(&out);
+    assert!(
+        c <= 2,
+        "analyze exited {c}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn revert_and_status_are_registered_commands() {
     // A command that exists in the enum but is not wired to a handler would
@@ -64,6 +84,35 @@ fn revert_and_status_are_registered_commands() {
 fn status_of_a_missing_config_dir_is_an_error() {
     let out = run(&["status", "--config", "/nonexistent/path/xyz"]);
     assert_eq!(code(&out), 2);
+}
+
+/// A bad `--io-device` must be refused, not written into the drop-in.
+///
+/// systemd ignores a limit on a device that does not exist, so a typo would
+/// install cleanly and enforce nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn generate_rejects_a_nonexistent_io_device() {
+    let out = run(&[
+        "generate",
+        "--profile",
+        "web-server",
+        "--output",
+        "/tmp/service-limiter-io-device-test",
+        "--io-device",
+        "/dev/definitely-not-a-real-device",
+    ]);
+    assert_eq!(
+        code(&out),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("does not exist"),
+        "must say the device is missing: {err}"
+    );
 }
 
 #[test]

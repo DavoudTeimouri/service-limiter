@@ -50,6 +50,10 @@ enum Command {
         profile: String,
         #[arg(long, default_value = "./config")]
         output: PathBuf,
+        /// Block device for the I/O bandwidth limits, e.g. /dev/sda1.
+        /// Overrides the profile's `io_device`.
+        #[arg(long)]
+        io_device: Option<PathBuf>,
     },
     /// Install staged configs.
     Apply {
@@ -87,7 +91,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Analyze { profile } => analyze(profile.as_deref()),
-        Command::Generate { profile, output } => generate(&profile, &output),
+        Command::Generate {
+            profile,
+            output,
+            io_device,
+        } => generate(&profile, &output, io_device.as_deref()),
         Command::Apply {
             config,
             dry_run,
@@ -196,11 +204,31 @@ fn analyze(profile_name: Option<&str>) -> u8 {
     }
 }
 
-fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
-    let policy = match resolve_policy(Some(profile_name)) {
+fn generate(
+    profile_name: &str,
+    output: &std::path::Path,
+    io_device: Option<&std::path::Path>,
+) -> u8 {
+    let mut policy = match resolve_policy(Some(profile_name)) {
         Ok(p) => p,
         Err(code) => return code,
     };
+
+    // The CLI override wins over the profile. Validate it: systemd ignores a
+    // limit on a device that does not exist, so a typo would produce a
+    // drop-in that installs cleanly and enforces nothing.
+    if let Some(device) = io_device {
+        if !device.exists() {
+            eprintln!(
+                "error: I/O device {} does not exist. Check the path, or drop \
+                 --io-device to skip the I/O limits.",
+                device.display()
+            );
+            return exit::ERROR;
+        }
+        policy.io_device = Some(device.display().to_string());
+    }
+
     let result = match orchestrator::run(&policy) {
         Ok(r) => r,
         Err(e) => {
@@ -285,8 +313,11 @@ fn generate(profile_name: &str, output: &std::path::Path) -> u8 {
 }
 
 fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u8 {
+    // On Linux systemd owns the limit, so it survives this process exiting and
+    // a reboot. --durable is a Windows concern and is a no-op here.
+    #[cfg(target_os = "linux")]
     if durable {
-        eprintln!("warning: --durable is not yet implemented in the Rust port; limits will lapse.");
+        eprintln!("note: --durable is Windows-only; systemd limits already persist.");
     }
     if !config.is_dir() {
         eprintln!(
@@ -302,7 +333,7 @@ fn apply(config: &std::path::Path, dry_run: bool, yes: bool, durable: bool) -> u
         return exit::NEEDS_ROOT;
     }
 
-    match apply::run(config, dry_run, yes) {
+    match apply::run(config, dry_run, yes, durable) {
         Ok(outcome) => {
             println!(
                 "applied {}, skipped {}, failed {}",
