@@ -2,9 +2,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::process::Command;
 use std::process::Stdio;
@@ -35,20 +33,22 @@ pub fn run(
     assume_yes: bool,
     durable: bool,
 ) -> std::io::Result<Outcome> {
-    // cfg-gated per OS rather than a fn-pointer table: one target is compiled
-    // at a time, so there is nothing to dispatch on at runtime.
-    #[cfg(target_os = "linux")]
-    let filename = "override.conf";
-    #[cfg(target_os = "windows")]
-    let filename = "Set-JobLimits.ps1";
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
+    // The filename and the installer are chosen at runtime rather than by
+    // `cfg`, so both platform paths are compiled and linted on every target.
+    // A `#[cfg]`-gated path is only ever checked by one CI job, which is how
+    // the Windows build broke twice before this was changed.
+    if !matches!(std::env::consts::OS, "linux" | "windows") {
         eprintln!("error: Unsupported platform: {}", std::env::consts::OS);
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!("unsupported platform: {}", std::env::consts::OS),
         ));
     }
+    let filename = if cfg!(target_os = "windows") {
+        "Set-JobLimits.ps1"
+    } else {
+        "override.conf"
+    };
 
     let mut entries: Vec<_> = fs::read_dir(config_dir)?.filter_map(Result::ok).collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -86,16 +86,14 @@ pub fn run(
             continue;
         }
 
-        #[cfg(target_os = "linux")]
-        let installed = {
+        let installed = if cfg!(target_os = "windows") {
+            install_windows(&service, &staged, durable)
+        } else {
             // --durable is a Windows concern: systemd owns the limit and it
             // persists on its own.
             let _ = durable;
             install_linux(&service, &staged)
         };
-        #[cfg(target_os = "windows")]
-        let installed = install_windows(&service, &staged, durable);
-
         match installed {
             Ok(true) => out.applied += 1,
             Ok(false) => out.skipped += 1,
@@ -109,18 +107,16 @@ pub fn run(
 }
 
 /// The installed path for a service, if this platform has one.
-#[cfg(target_os = "linux")]
+///
+/// Windows has no persistent installed artifact: limits live in a Job Object
+/// held by the running process, so they vanish when it exits.
 fn installed_path(service: &str) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        return PathBuf::new();
+    }
     PathBuf::from(format!(
         "/etc/systemd/system/{service}.service.d/override.conf"
     ))
-}
-
-/// Windows has no persistent installed artifact: limits live in a Job Object
-/// held by the running process, so they vanish when it exits.
-#[cfg(target_os = "windows")]
-fn installed_path(_service: &str) -> std::path::PathBuf {
-    std::path::PathBuf::new()
 }
 
 /// Remove installed limits for every staged service.
@@ -149,45 +145,41 @@ pub fn revert(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Re
             continue;
         }
 
-        #[cfg(target_os = "linux")]
-        {
-            let target = installed_path(&service);
-            if !target.exists() {
-                eprintln!("note: {service}: nothing installed at {}", target.display());
-                out.skipped += 1;
-                continue;
-            }
-
-            if dry_run {
-                println!("[DRY-RUN] would revert {service} at {}", target.display());
-                out.applied += 1;
-                continue;
-            }
-
-            match revert_linux(&service, &target) {
-                Ok(()) => out.applied += 1,
-                Err(e) => {
-                    eprintln!("error: {service}: {e}");
-                    out.failed += 1;
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
+        if cfg!(target_os = "windows") {
             eprintln!(
                 "warning: {service}: Windows limits are held by a running process and \
                  cannot be removed from disk. Stop the service-limiter process \
                  that applied them."
             );
             out.skipped += 1;
+            continue;
+        }
+
+        let target = installed_path(&service);
+        if !target.exists() {
+            eprintln!("note: {service}: nothing installed at {}", target.display());
+            out.skipped += 1;
+            continue;
+        }
+
+        if dry_run {
+            println!("[DRY-RUN] would revert {service} at {}", target.display());
+            out.applied += 1;
+            continue;
+        }
+
+        match revert_linux(&service, &target) {
+            Ok(()) => out.applied += 1,
+            Err(e) => {
+                eprintln!("error: {service}: {e}");
+                out.failed += 1;
+            }
         }
     }
     Ok(out)
 }
 
 /// Restore the pre-apply config, or delete the drop-in when there was none.
-#[cfg(target_os = "linux")]
 fn revert_linux(service: &str, target: &Path) -> std::io::Result<()> {
     let backup = target.with_extension("conf.bak");
 
@@ -248,26 +240,23 @@ pub fn status(config_dir: &Path) -> std::io::Result<Outcome> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        #[cfg(target_os = "linux")]
-        {
-            let target = installed_path(&service);
-            if target.exists() {
-                let backup = target.with_extension("conf.bak");
-                let restorable = if backup.exists() {
-                    " (backup present)"
-                } else {
-                    ""
-                };
-                println!("{service}: installed at {}{restorable}", target.display());
-                out.applied += 1;
-            } else {
-                println!("{service}: not installed");
-            }
+        if cfg!(target_os = "windows") {
+            println!("{service}: cannot be determined; Windows limits live in a Job Object");
+            continue;
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            println!("{service}: cannot be determined; Windows limits live in a Job Object");
+        let target = installed_path(&service);
+        if target.exists() {
+            let backup = target.with_extension("conf.bak");
+            let restorable = if backup.exists() {
+                " (backup present)"
+            } else {
+                ""
+            };
+            println!("{service}: installed at {}{restorable}", target.display());
+            out.applied += 1;
+        } else {
+            println!("{service}: not installed");
         }
     }
     Ok(out)
@@ -294,8 +283,11 @@ fn confirm_revert(service: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
+/// Install a systemd drop-in and restart the unit.
+///
+/// Not `#[cfg(target_os = "linux")]`: the body is plain `std::process` and
+/// `std::fs`, so compiling it on every target means CI type-checks and
+/// lints the Linux path even on a Windows runner.
 fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
     let drop_in_dir: PathBuf = PathBuf::from(format!("/etc/systemd/system/{service}.service.d"));
     let target = drop_in_dir.join("override.conf");
@@ -366,7 +358,6 @@ fn install_linux(service: &str, staged: &Path) -> std::io::Result<bool> {
 /// different problems and must not be reported the same way -- "systemd
 /// rejected this config" is wrong and misleading when the real cause is that
 /// `systemd-analyze` is not installed.
-#[cfg(target_os = "linux")]
 fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
     let mut probe = tempfile::NamedTempFile::with_suffix(".service")
         .map_err(|e| format!("cannot create probe file: {e}"))?;
@@ -403,7 +394,6 @@ fn verify_with_systemd_analyze(content: &str) -> Result<(), String> {
 /// Not `#[cfg(target_os = "windows")]`: the body is plain `std::process`,
 /// so compiling it everywhere means the Windows path is type-checked by the
 /// Linux build and CI. It only *runs* on Windows.
-#[allow(dead_code)]
 fn install_windows(service: &str, staged: &Path, durable: bool) -> std::io::Result<bool> {
     // Prefer pwsh (PowerShell 7+); fall back to the deprecated 5.1 host.
     let shell = ["pwsh", "powershell"]

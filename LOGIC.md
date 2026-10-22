@@ -54,18 +54,34 @@ Steps 1–4 read only. Nothing writes to a system path until `apply`.
 
 ### 2.1 Platform dispatch
 
-`cfg(target_os = "linux" | "windows")` gates the modules, and each is re-exported
-under the same name:
+Both platform modules are compiled on every target, and the choice is made at
+runtime:
 
 ```rust
-#[cfg(target_os = "linux")]
-pub use linux::{discover_services, main_pids, DEFAULT_INTERVAL};
-#[cfg(target_os = "windows")]
-pub use windows::{discover_services, main_pids, DEFAULT_INTERVAL};
+pub mod linux;
+pub mod windows;
+
+pub fn discover_services() -> Result<Vec<ServiceDescriptor>, String> {
+    if cfg!(target_os = "windows") {
+        windows::discover_services()
+    } else {
+        linux::discover_services()
+    }
+}
 ```
 
 Call sites read `platform::discover_services()` with no match and no `cfg` noise,
-and no trait is needed because there is only ever one implementation compiled.
+and no trait is needed because there is only ever one implementation per
+platform.
+
+**Why runtime dispatch and not `#[cfg]`**: a `#[cfg]`-gated module is compiled
+by exactly one CI job. The Windows module was `#[cfg(target_os = "windows")]`,
+so the Linux job never type-checked it, and the Windows-only build breaks it
+found (a missing `HashMap` import, an unused variable, an unused `mut`) sat
+unnoticed until a Windows runner hit it. With both modules always compiled,
+every build checks both paths. The same applies to `apply.rs`, where the Linux
+and Windows installers are plain `std::process` and `std::fs` and compile
+anywhere.
 
 `main_pids` is batched on purpose: one `systemctl show` (or one CIM query on
 Windows) for the whole set, not one process per service. Per-service lookups

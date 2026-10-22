@@ -1,20 +1,40 @@
-//! Platform dispatch via cfg, not traits: one implementation is compiled per
-//! target, so a trait would add dispatch with no polymorphism.
+//! Platform dispatch, not traits: there is no polymorphism to abstract.
+//!
+//! BOTH platform modules are compiled on every target and the choice is made
+//! at runtime. The Windows code used to be behind `#[cfg(target_os =
+//! "windows")]`, which meant the Linux CI job never compiled it -- so a
+//! Windows-only build break (a missing import, an unused variable) sat
+//! unnoticed until a Windows runner hit it. Now every build type-checks and
+//! lints both paths.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-#[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "windows")]
 pub mod windows;
 
-#[cfg(target_os = "linux")]
-pub use linux::{discover_services, main_pids, DEFAULT_INTERVAL};
-#[cfg(target_os = "windows")]
-pub use windows::{discover_services, main_pids, DEFAULT_INTERVAL};
+/// Default sample window. The same on both platforms.
+pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Running services, discovered the way this platform does.
+pub fn discover_services() -> Result<Vec<crate::models::ServiceDescriptor>, String> {
+    if cfg!(target_os = "windows") {
+        windows::discover_services()
+    } else {
+        linux::discover_services()
+    }
+}
+
+/// Main PIDs for the given services, resolved in one batched call.
+pub fn main_pids(services: &[String]) -> HashMap<String, u32> {
+    if cfg!(target_os = "windows") {
+        windows::main_pids(services)
+    } else {
+        linux::main_pids(services)
+    }
+}
 
 /// Logical CPUs a service can actually use here.
 ///

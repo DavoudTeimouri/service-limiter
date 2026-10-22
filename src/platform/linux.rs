@@ -1,12 +1,8 @@
 //! Linux service discovery and process-tree measurement.
 
 use std::process::Command;
-use std::time::Duration;
 
 use crate::models::ServiceDescriptor;
-
-/// Default sample window. Short spikes are missed; see LOGIC.md §2.3.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Parse `systemctl list-units` output.
 ///
@@ -112,6 +108,7 @@ pub fn main_pids(units: &[String]) -> std::collections::HashMap<String, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     const SYSTEMCTL_OUTPUT: &str = "\
 sshd.service loaded active running OpenSSH server daemon

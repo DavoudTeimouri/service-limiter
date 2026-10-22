@@ -1,7 +1,7 @@
 //! Windows service discovery and process measurement.
 
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 /// Preferred shell: PowerShell 7+, falling back to the deprecated 5.1 host.
 pub fn powershell() -> Option<&'static str> {
@@ -133,5 +133,3 @@ fn run_ps(script: &str) -> Result<String, String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
-
-pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(250);

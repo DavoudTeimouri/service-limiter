@@ -26,6 +26,7 @@ Pre-release. Test it before it is promoted to a stable release.
 - A docs-freshness test fails the build when README.md or LOGIC.md names a `platform::` symbol that no longer exists, or when a CLI subcommand is not documented
 
 ### Changed
+- Both platform modules are now compiled on every target, and the platform is chosen at runtime. A `#[cfg]`-gated module is compiled by exactly one CI job, so the Windows code was never type-checked by the Linux job and the Windows-only build breaks it found (a missing `HashMap` import, an unused variable, an unused `mut`) went unnoticed until a Windows runner hit them. The same applies to the Linux and Windows installers in `apply.rs`, which are plain `std::process` and `std::fs` and compile anywhere
 - Services are measured over several sampling windows instead of one, and the reported figure is the worst window rather than the average. A single 250 ms window missed short spikes, and averaging would have averaged away a sustained one
 - All services share each sampling window. Sampling each service separately cost a full process-table scan and a sleep per service, so profiling 50 services spent over 12 seconds asleep
 - Service PIDs are resolved in one batch (`systemctl show` with all units, or one CIM query) instead of one process per service. On Windows this removed a PowerShell startup per service, which cost hundreds of milliseconds each

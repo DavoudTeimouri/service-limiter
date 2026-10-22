@@ -1,6 +1,5 @@
 //! CLI contract tests: exit codes and staging layout are the public interface.
 
-use std::path::Path;
 use std::process::Command;
 
 fn bin() -> &'static str {
@@ -225,7 +224,7 @@ fn apply_dry_run_touches_nothing() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("DRY-RUN"));
     // The staged tree must be unchanged; nothing may be written to /etc.
     assert!(svc.join("override.conf").exists());
-    assert!(!Path::new("/etc/systemd/system/sshd.service.d/override.conf").exists());
+    assert!(!std::path::Path::new("/etc/systemd/system/sshd.service.d/override.conf").exists());
 }
 
 #[cfg(target_os = "linux")]
