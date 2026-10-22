@@ -59,13 +59,17 @@ under the same name:
 
 ```rust
 #[cfg(target_os = "linux")]
-pub use linux::{discover_services, main_pid, DEFAULT_INTERVAL};
+pub use linux::{discover_services, main_pids, DEFAULT_INTERVAL};
 #[cfg(target_os = "windows")]
-pub use windows::{discover_services, main_pid, DEFAULT_INTERVAL};
+pub use windows::{discover_services, main_pids, DEFAULT_INTERVAL};
 ```
 
 Call sites read `platform::discover_services()` with no match and no `cfg` noise,
 and no trait is needed because there is only ever one implementation compiled.
+
+`main_pids` is batched on purpose: one `systemctl show` (or one CIM query on
+Windows) for the whole set, not one process per service. Per-service lookups
+cost a `systemctl` or PowerShell startup each, which dominated runtime.
 
 ### 2.2 Discovery
 
@@ -103,15 +107,21 @@ Windows profiler reaches the process without a second query.
 
 The only place real numbers are produced. Shared by both platforms: `sysinfo`
 already abstracts `/proc` and the Windows process APIs, so
-`platform::sample_tree` in `src/platform/mod.rs` is the single implementation.
+`platform::sample_trees` in `src/platform/mod.rs` is the single implementation.
 
 ```rust
-pub fn sample_tree(root: u32, interval: Duration) -> Option<Sample>
+pub fn sample_trees(roots: &[u32], interval: Duration) -> HashMap<u32, Sample>
 ```
 
 1. `refresh_processes_specifics` to prime the process table.
 2. Sleep `interval` (default **250 ms**).
 3. Refresh again and diff.
+
+**One window for all services**: sampling each tree separately cost a full
+process-table scan and a sleep per service, so profiling 50 services spent over
+12 seconds asleep. One shared window costs 2 scans and 1 sleep regardless of
+service count. The trade-off is that every tree is measured over the same
+window, so their numbers are directly comparable.
 
 **Why prime first**: `cpu_usage()` and `disk_usage()` are deltas between
 refreshes. The first call establishes the baseline; a single call returns
@@ -294,7 +304,8 @@ explicitly rather than emit a one-shot script.
 | Per-service confirm | `y/N`, unless `--yes` |
 | `--dry-run` | prints planned writes, touches nothing, exits early |
 | `systemd-analyze verify` | rejects on `Unknown key` / `Invalid`; **refuses before touching `/etc`** |
-| Backup | existing `override.conf` copied to `.bak` before overwrite |
+| Backup | existing `override.conf` copied to `.bak` before overwrite. An existing `.bak` is **not** overwritten, so the original survives repeated applies |
+| `systemctl` exit code | a failed `daemon-reload` or `restart` fails the service instead of being reported as success |
 | Audit log | JSONL appended to `~/.service-limiter/audit.log` |
 
 Ordering matters: validation runs **before** the first write to a system path, so a
@@ -311,6 +322,23 @@ malformed drop-in never lands in `/etc` half-applied.
 
 `2` matters: exit `0` must never be reachable when the tool could not actually measure
 anything. Zero measurable services is a failure, not a clean run.
+
+### 5.3 Undoing an apply
+
+`apply` used to be a one-way door: it wrote a drop-in, restarted the unit, and
+left a `.bak` behind that only a human could restore.
+
+`revert --config DIR` closes that: it restores the `.bak` when there is one,
+otherwise deletes the drop-in, then reloads systemd and restarts the unit. The
+`.bak` is removed once restored, so a second `revert` is a no-op rather than a
+second restore.
+
+`status --config DIR` reports which staged services currently have limits
+installed, and whether a restorable backup exists. It needs no elevation: it
+only reads.
+
+On Windows neither applies: limits live in a Job Object held by the running
+process, so there is nothing on disk to revert and nothing to report.
 
 ### 5.2 Audit log
 
@@ -498,7 +526,7 @@ Claims **not** covered by a test, and how to verify by hand:
 | 2 | Windows Job Object limits lapse when the script exits | enforcement is transient | §4.2 |
 | 3 | I/O limits need a device path, so profiles without `io_device` get none | I/O silently unenforced | §4.1 |
 | 4 | Single-interval sampling | misses short spikes | §2.3 |
-| 5 | No `revert` / `status` command | `apply` is a one-way door | backups exist but must be restored by hand |
+| 5 | ~~No `revert` / `status` command~~ | **fixed**: `revert` restores the backup or removes the drop-in, `status` reports what is installed | §5.3 |
 | 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host | needs a Windows runner |
 | 7 | ~~`profiles/` duplicated at repo root~~ | redundant file; cleaned up | §6 |
 | 8 | `--durable` not yet implemented | Windows limits lapse; use --durable to hold the handle (supervised process coming later) | MIGRATING.md |

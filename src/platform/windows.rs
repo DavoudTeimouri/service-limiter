@@ -15,13 +15,50 @@ pub fn powershell() -> Option<&'static str> {
     })
 }
 
-/// MainPID of a service, from Win32_Service. 0 means not running.
-pub fn main_pid(service: &str) -> Option<u32> {
-    // Escape single quotes for PowerShell single-quoted string: ' -> ''
-    let safe = service.replace('\'', "''");
-    let script = format!("(Get-CimInstance Win32_Service -Filter \"Name='{safe}\").ProcessId");
-    let out = run_ps(&script).ok()?;
-    out.trim().parse().ok()
+/// MainPIDs for many services, in ONE PowerShell invocation.
+///
+/// One CIM query for the whole set, keyed by name in the output. Spawning a
+/// PowerShell process per service meant N startups, each costing hundreds of
+/// milliseconds, so listing 50 services took over 30 seconds.
+pub fn main_pids(services: &[String]) -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    if services.is_empty() {
+        return out;
+    }
+
+    // One CIM query for the whole set, keyed by name in the output.
+    let script = "Get-CimInstance Win32_Service | \
+                  Select-Object Name,ProcessId | \
+                  ConvertTo-Json -Compress";
+    let Ok(raw) = run_ps(script) else {
+        return out;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return out;
+    };
+    let items = match parsed {
+        serde_json::Value::Array(a) => a,
+        other => vec![other],
+    };
+    let mut all: HashMap<String, u32> = HashMap::new();
+    for v in &items {
+        if let (Some(name), Some(pid)) = (
+            v.get("Name").and_then(|n| n.as_str()),
+            v.get("ProcessId").and_then(|p| p.as_u64()),
+        ) {
+            all.insert(name.to_string(), pid as u32);
+        }
+    }
+
+    // Keep only the requested services, and only ones that are actually running.
+    for name in services {
+        if let Some(pid) = all.get(name) {
+            if *pid > 0 {
+                out.insert(name.clone(), *pid);
+            }
+        }
+    }
+    out
 }
 
 /// Running services, via CIM. Returns Err when no PowerShell is available.

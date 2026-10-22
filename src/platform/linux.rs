@@ -56,14 +56,57 @@ pub fn discover_services() -> Result<Vec<ServiceDescriptor>, String> {
     Ok(parse_list_units(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// MainPID of a systemd unit, or None when it has no live process.
-pub fn main_pid(unit: &str) -> Option<u32> {
-    let out = Command::new("systemctl")
-        .args(["show", unit, "-p", "MainPID", "--value"])
-        .output()
-        .ok()?;
-    let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-    (pid != 0).then_some(pid)
+/// MainPIDs for many units, in ONE `systemctl show` invocation.
+///
+/// `systemctl show` accepts several units and prints a `Key=Value` block per
+/// unit, so N units cost one process instead of N.
+///
+/// Parses `Key=Value` lines rather than `--value` output: with `--value` the
+/// property order is not guaranteed, so matching values to units would be
+/// guesswork. `Id=` gives the unit name back, which is how each MainPID is
+/// matched to its unit.
+pub fn main_pids(units: &[String]) -> std::collections::HashMap<String, u32> {
+    let mut out = std::collections::HashMap::new();
+    if units.is_empty() {
+        return out;
+    }
+
+    let mut cmd = Command::new("systemctl");
+    cmd.args(["show", "--property=Id,MainPID"]);
+    for unit in units {
+        cmd.arg(unit);
+    }
+    let Ok(output) = cmd.output() else {
+        return out;
+    };
+
+    // Blocks look like:  Id=sshd.service \n MainPID=1234
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "Id" => {
+                current = Some(value.trim().trim_end_matches(".service").to_string());
+            }
+            "MainPID" => {
+                let Ok(pid) = value.trim().parse::<u32>() else {
+                    continue;
+                };
+                // A unit with no live process reports MainPID=0. Skip it, the
+                // same way main_pid does.
+                if pid != 0 {
+                    if let Some(name) = current.take() {
+                        out.insert(name, pid);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -108,7 +151,10 @@ cron.service loaded active running Regular background program processing daemon
     #[test]
     fn samples_this_process_with_real_usage() {
         let me = std::process::id();
-        let sample = crate::platform::sample_tree(me, Duration::from_millis(50))
+        let samples = crate::platform::sample_trees(&[me], Duration::from_millis(50));
+        let sample = samples
+            .get(&me)
+            .copied()
             .expect("current process must be samplable");
         assert!(sample.rss_bytes > 0, "{sample:?}");
         assert!(sample.elapsed_secs > 0.0, "{sample:?}");
@@ -116,6 +162,7 @@ cron.service loaded active running Regular background program processing daemon
 
     #[test]
     fn missing_pid_returns_none() {
-        assert!(crate::platform::sample_tree(u32::MAX, Duration::from_millis(10)).is_none());
+        let samples = crate::platform::sample_trees(&[u32::MAX], Duration::from_millis(10));
+        assert!(samples.get(&u32::MAX).is_none());
     }
 }

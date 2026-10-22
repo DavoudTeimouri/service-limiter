@@ -12,9 +12,9 @@ pub mod linux;
 pub mod windows;
 
 #[cfg(target_os = "linux")]
-pub use linux::{discover_services, main_pid, DEFAULT_INTERVAL};
+pub use linux::{discover_services, main_pids, DEFAULT_INTERVAL};
 #[cfg(target_os = "windows")]
-pub use windows::{discover_services, main_pid, DEFAULT_INTERVAL};
+pub use windows::{discover_services, main_pids, DEFAULT_INTERVAL};
 
 /// Logical CPUs a service can actually use here.
 ///
@@ -31,19 +31,31 @@ pub fn cpu_count() -> usize {
         .unwrap_or(1)
 }
 
-/// Process-tree measurement. Identical on both platforms because sysinfo
-/// already abstracts the underlying /proc and Windows APIs.
+/// Measure several process trees over ONE shared sampling window.
+///
+/// Sampling each tree separately costs a full process-table scan and a sleep
+/// per service: for N services that is 2N scans and N sleeps, so measuring
+/// 50 services takes over 12 seconds of pure sleep. One shared window costs
+/// 2 scans and 1 sleep regardless of N.
+///
+/// The trade-off: every tree is measured over the same window, so their
+/// numbers are directly comparable. Per-tree sampling gave each service its
+/// own window, which made the results incomparable in a different way.
 ///
 /// NOTE on units: `cpu_percent` is **per-core**, not a fraction of the machine.
 /// Measured on this host: one saturated thread reads ~161%. So 100% == one core.
 /// This is the same convention psutil uses, and it is NOT the convention
 /// systemd's `CPUQuota=` uses (where 100% == one core too, but the policy field
 /// `cpu_percent` reads as a whole-machine share). See LOGIC.md 3.1.
-pub fn sample_tree(root: u32, interval: std::time::Duration) -> Option<Sample> {
-    sample_tree_shared(root, interval)
-}
+pub fn sample_trees(
+    roots: &[u32],
+    interval: std::time::Duration,
+) -> HashMap<u32, Sample> {
+    let mut out = HashMap::new();
+    if roots.is_empty() {
+        return out;
+    }
 
-fn sample_tree_shared(root: u32, interval: std::time::Duration) -> Option<Sample> {
     // with_disk_usage() is required for disk_usage() to be non-zero; the default
     // refresh kind also pulls cmd/exe/environ data this tool never reads.
     let kinds = ProcessRefreshKind::everything().with_disk_usage();
@@ -54,14 +66,25 @@ fn sample_tree_shared(root: u32, interval: std::time::Duration) -> Option<Sample
     let started = Instant::now();
     std::thread::sleep(interval);
     sys.refresh_processes_specifics(ProcessesToUpdate::All, kinds);
+    let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
 
-    let tree = descendents(&sys, Pid::from_u32(root));
+    for root in roots {
+        if let Some(sample) = sample_from(&sys, *root, elapsed) {
+            out.insert(*root, sample);
+        }
+    }
+    out
+}
+
+/// Sum one tree's usage out of an already-refreshed process table.
+fn sample_from(sys: &System, root: u32, elapsed_secs: f64) -> Option<Sample> {
+    let tree = descendents(sys, Pid::from_u32(root));
     if tree.is_empty() {
         return None;
     }
 
     let mut sample = Sample {
-        elapsed_secs: started.elapsed().as_secs_f64().max(f64::EPSILON),
+        elapsed_secs,
         ..Default::default()
     };
     for pid in tree {

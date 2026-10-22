@@ -124,7 +124,9 @@ holder-process workaround rather than a real fix. See [LOGIC.md](LOGIC.md).
 
 ### `service-limiter analyze [--profile NAME]`
 
-Discovers services and measures them. Prints a count and the first few services.
+Discovers services and measures them. Prints every measured service with its
+CPU, memory and I/O usage, and lists separately the ones over the policy with
+the values that put them there.
 
 ```bash
 service-limiter analyze --profile web-server
@@ -142,6 +144,10 @@ Creates `./config/<service>/override.conf` on Linux or
 `./config/<service>/Set-JobLimits.ps1` on Windows. Exits 0 even when nothing exceeded
 the policy, so check stdout for the count.
 
+Staged configs for services that are no longer over the policy are removed, so
+a service that comes back under the limit stops being limited on the next
+`apply`. Files this tool did not create are never touched.
+
 ### `service-limiter apply --config DIR [--dry-run] [--yes] [--durable]`
 
 Installs staged configs.
@@ -155,6 +161,31 @@ Installs staged configs.
 On Linux, in order: verify the drop-in with `systemd-analyze verify` (**before**
 touching `/etc`), back up any existing `override.conf` to `.bak`, then
 `daemon-reload` + `restart`.
+
+An existing `.bak` is never overwritten, so the original config survives
+repeated applies.
+
+### `service-limiter revert --config DIR [--dry-run] [--yes]`
+
+Removes installed limits. Restores the `.bak` when there is one, otherwise
+deletes the drop-in, then reloads systemd and restarts the unit.
+
+```bash
+sudo service-limiter revert --config ./config --dry-run
+sudo service-limiter revert --config ./config --yes
+```
+
+On Windows there is nothing to remove from disk: limits live in a Job Object
+held by the running process, so they lapse when that process exits.
+
+### `service-limiter status --config DIR`
+
+Shows which staged services currently have limits installed, and whether a
+restorable backup exists.
+
+```bash
+service-limiter status --config ./config
+```
 
 ---
 

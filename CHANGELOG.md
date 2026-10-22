@@ -7,16 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- `service-limiter revert --config DIR`: undoes an `apply`. Restores the `.bak` that `apply` wrote, or deletes the drop-in when there was no original, then reloads systemd and restarts the unit. Supports `--dry-run` and `--yes`
+- `service-limiter status --config DIR`: shows which staged services currently have limits installed and whether a restorable backup exists
+- `analyze` now prints the measured CPU, memory and I/O for every service, and lists the services over the policy separately with the values that put them there. It previously printed only the first five service names with no measurements, so the user could not tell which services were the problem
 - Audit log restored in the Rust build: JSONL at `~/.service-limiter/audit.log`, covering `analyze`, `generate`, `apply`, and the failure paths `analyze_error`, `generate_error`, `apply_error`, `apply_denied`. Failed runs are recorded, not just successful ones. `SERVICE_LIMITER_HOME` relocates it. Values are JSON-escaped so a crafted service name cannot forge a line
 - `ResourceProfile.cpu_percent_percore`: the raw per-core figure, alongside the normalized machine share
 
 ### Changed
+- All services are measured over ONE shared sampling window. Sampling each service separately cost a full process-table scan and a sleep per service, so profiling 50 services spent over 12 seconds asleep
+- Service PIDs are resolved in one batch (`systemctl show` with all units, or one CIM query) instead of one process per service. On Windows this removed a PowerShell startup per service, which cost hundreds of milliseconds each
 - `cpu_percent` is now a consistent whole-machine share. Both the measurement (divided by core count) and the generated limits (multiplied by it) are normalized, so the limit matches the policy that produced it
+- `generate` removes staged configs for services that are no longer over the policy. Leaving them behind meant `apply` kept installing limits for a service that had come back under the limit. Files this tool did not create are never touched
 
 ### Fixed
+- `apply` ignored `systemctl`'s exit code, so a failed `daemon-reload` or `restart` was reported as "restarted {service}". Both are now checked and a non-zero exit fails the service
+- `apply` overwrote the existing `override.conf.bak` on every run, so a second `apply` destroyed the only copy of the original config. An existing backup is now left untouched
+- The `systemd-analyze` validation gate reported "systemd rejected this config" even when the real cause was that `systemd-analyze` was not installed. The two cases are now distinguished
+- The test that asserts an invalid drop-in is rejected passed for the wrong reason when `systemd-analyze` was missing, and did not check that the offending key was named. Both are fixed
 - CPU limits were far tighter than the policy that set them: `CPUQuota={cpu_percent}%` was emitted while `cpu_percent` read as a whole-machine share, but systemd measures `CPUQuota` per-CPU. On a 32-core host a `50` policy throttled a service to 1.6% of the machine. Windows `CpuRate` had the same mismatch. Core count comes from `available_parallelism()`, which respects the cgroup CPU quota, so a container capped at 1 CPU scales correctly instead of emitting a quota the cgroup can never grant
 
 ### Removed
+- The `windows-sys` dependency. It was declared but never referenced: the Windows path shells out to PowerShell, which calls the Win32 Job Object APIs itself through `Add-Type`. It pulled in a large dependency tree for nothing
 
 ## [2.0.0] - 2026-10-09
 
@@ -27,7 +38,6 @@ See [MIGRATING.md](MIGRATING.md) if you used the Python 1.x CLI.
 - Install method changed: `pip install service-limiter` no longer works. Use a release binary (`service-limiter-linux-x86_64.tar.gz`, `service-limiter-linux-aarch64.tar.gz`, `service-limiter-windows-x86_64.zip`, each with a `.sha256`) or `cargo install --git https://github.com/DavoudTeimouri/service-limiter.git`. The PyPI package stays frozen at 1.0.0
 - The Python implementation, `pyproject.toml`, and the curses TUI are removed
 - `--durable` is accepted but not implemented in the Rust build; it warns instead of silently doing nothing new
-- The audit log is not written yet. `~/.service-limiter/audit.log` was written by 1.x and is not written by 2.0.0
 
 ### Unchanged on purpose
 - Command name and all flags: `service-limiter {analyze,generate,apply}` with `--profile`, `--output`, `--config`, `--dry-run`, `--yes`
@@ -37,8 +47,8 @@ See [MIGRATING.md](MIGRATING.md) if you used the Python 1.x CLI.
 - Generated systemd drop-in text, byte for byte
 
 ### Added
-- Rust implementation: clap CLI, serde models, sysinfo-based process-tree measurement, `windows-sys` Job Object FFI on Windows
-- `platform::sample_tree` shared by both platforms, so measurement cannot drift between them
+- Rust implementation: clap CLI, serde models, sysinfo-based process-tree measurement, PowerShell Job Object control on Windows
+- `platform::sample_trees` shared by both platforms, so measurement cannot drift between them
 - `src/job_limits.ps1` is a real file embedded with `include_str!`, shared verbatim with 1.x rather than duplicated
 - Integration tests pinning the exit-code contract
 - `apply` validates a drop-in with `systemd-analyze verify` and refuses before touching `/etc` if systemd rejects it
@@ -67,7 +77,7 @@ See [MIGRATING.md](MIGRATING.md) if you used the Python 1.x CLI.
 - `SharedState` (a mutable bag with a single consumer)
 
 ### Known limitations
-- `--durable` and the audit log are not implemented in the Rust build yet
+- `--durable` is not implemented in the Rust build yet; limits lapse when the process exits
 - `CPUQuota` is a share of one CPU while `cpu_percent` reads as a whole-machine share; still unresolved
 - Linux I/O limits require an `io_device` in the profile
 - Windows measures only the service's main PID; Linux walks the child tree

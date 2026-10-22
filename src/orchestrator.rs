@@ -54,26 +54,44 @@ pub fn run(policy: &Policy) -> Result<Analysis, String> {
 /// A service without a readable PID is skipped rather than reported as zero
 /// usage: zero would read as "well within policy", which is a different and
 /// wrong claim.
+///
+/// All services are measured over one shared sampling window. Measuring them
+/// one at a time cost a full process-table scan and a sleep per service, so
+/// profiling 50 services took over 12 seconds of pure sleep.
 fn profile_services(services: &[ServiceDescriptor]) -> BTreeMap<String, ResourceProfile> {
     let mut out = BTreeMap::new();
+
+    // Resolve every PID first, in one batch. Asking per service spawned one
+    // process (systemctl) or one PowerShell per service, which dominated
+    // runtime on hosts with many services.
+    let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
+    let pids = crate::platform::main_pids(&names);
+
+    let mut roots: Vec<(String, u32)> = Vec::new();
     for svc in services {
-        let Some(pid) = crate::platform::main_pid(&svc.name) else {
+        let Some(&pid) = pids.get(&svc.name) else {
             eprintln!("skipping {}: no live MainPID", svc.name);
             continue;
         };
-        let Some(sample) = crate::platform::sample_tree(pid, crate::platform::DEFAULT_INTERVAL)
-        else {
-            eprintln!("skipping {}: could not sample pid {pid}", svc.name);
+        roots.push((svc.name.clone(), pid));
+    }
+
+    let pids: Vec<u32> = roots.iter().map(|(_, pid)| *pid).collect();
+    let samples = crate::platform::sample_trees(&pids, crate::platform::DEFAULT_INTERVAL);
+
+    // The sampler reports per-core usage; the policy field is a share of the
+    // whole machine, so normalize here rather than in the generator.
+    let cores = crate::platform::cpu_count() as f32;
+    for (name, pid) in roots {
+        let Some(sample) = samples.get(&pid) else {
+            eprintln!("skipping {name}: could not sample pid {pid}");
             continue;
         };
         let secs = sample.elapsed_secs;
-        // The sampler reports per-core usage; the policy field is a share of the
-        // whole machine, so normalize here rather than in the generator.
-        let cores = crate::platform::cpu_count() as f32;
         out.insert(
-            svc.name.clone(),
+            name.clone(),
             ResourceProfile {
-                service_name: svc.name.clone(),
+                service_name: name,
                 cpu_percent: sample.cpu_percent / cores,
                 cpu_percent_percore: sample.cpu_percent,
                 memory_mb: sample.rss_bytes as f64 / 1024.0 / 1024.0,
