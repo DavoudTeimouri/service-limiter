@@ -74,7 +74,7 @@ fn render(event: &str, fields: &[(&str, String)]) -> String {
 ///
 /// ponytail: no chrono dependency. UTC via SystemTime, formatted by hand with
 /// civil-from-days. Add chrono if sub-second precision or parsing is ever needed.
-fn timestamp() -> String {
+pub fn timestamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

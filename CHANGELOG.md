@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 ### Removed
 
+## [2.1.0-rc.4] - 2026-10-28
+
+Fourth pre-release. Hardening from the agency code + security review: exit-code
+contract, durable-across-reboot, drift detection, and trust-boundary fixes.
+
+### Added
+- `analyze --profile-file FILE` loads a user-supplied JSON profile instead of a bundled one; the file's stem becomes the profile name. Same schema as bundled profiles (`cpu_percent`, `memory_mb`, `io_read_kbps`, `io_write_kbps`)
+- `analyze --watch [SECONDS]` repeats the human report every SECONDS (default 5), timestamped; Ctrl-C stops it
+- `status` compares the staged config against the installed drop-in and reports drift when they differ; tracked as a separate `drifted` outcome, not a failure
+- Windows `--durable` now registers a boot-time scheduled task (`schtasks /SC ONSTART`, runs as the invoking user) so the limits survive a reboot; `revert` removes the task too
+
+### Changed
+- Exit code `4` is `NOTHING_MEASURED`: distinct from `2` (error), so scripts can tell a healthy empty host from a broken run. `--io-device` now canonicalizes the path (symlink TOCTOU fix) and refuses anything that isn't a block device
+- Windows durable task runs as the invoking user, not `SYSTEM` (privilege-escalation reduction); PowerShell script path is single-quoted so spaces/special characters in `--config` are safe
+
+### Fixed
+- `schedule_holder` failure stops the already-running holder instead of leaving an orphan that won't survive reboot
+- `parse_limits` now tracks every `Key=Value` in the drop-in, so drift detection covers all directives, not just four
+- `systemd-analyze verify` probe now mirrors a real drop-in (one `[Service]` section) so a directive can't pass the gate and be silently ignored on the real unit
+- `unreachable!()` in `resolve_policy` replaced with an explicit error
+
 ## [2.1.0-rc.3] - 2026-10-22
 
 Third pre-release. Adds machine-readable output.

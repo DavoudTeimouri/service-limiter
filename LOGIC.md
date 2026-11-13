@@ -3,7 +3,7 @@
 Authoritative description of **how the tool works and why**. Written before the Rust
 rewrite so both implementations share one reference.
 
-**Status**: describes the Rust implementation (2.1.0-rc.3). The previous Python
+**Status**: describes the Rust implementation (2.1.0-rc.4). The previous Python
 implementation was 1.0.0; both are covered under
 [Compatibility contract](#9-compatibility-contract) and [MIGRATING.md](MIGRATING.md).
 
@@ -572,6 +572,6 @@ Claims **not** covered by a test, and how to verify by hand:
 | 5 | ~~No `revert` / `status` command~~ | **fixed**: `revert` restores the backup or removes the drop-in, `status` reports what is installed | §5.3 |
 | 6 | Windows path compiles but is unverified at runtime | discovery + Job Object untested on a real host. The apply path is now compiled on Linux too, so it is type-checked; only its *runtime* behaviour needs a Windows host | needs a Windows runner |
 | 7 | ~~`profiles/` duplicated at repo root~~ | redundant file; cleaned up | §6 |
-| 8 | The `--durable` holder does not survive a reboot | limits lapse until the holder is started again | a Windows Service or scheduled task would fix it |
+| 8 | ~~The `--durable` holder does not survive a reboot~~ | **fixed in 2.1.0-rc.4**: `apply --durable` registers a boot-time scheduled task (`schtasks /SC ONSTART`) that re-creates the holder at boot, so limits survive a reboot | §4.2 |
 | 9 | Windows limits cover the main process, not pre-existing children | a child started before the Job Object assignment is not limited | children started *after* the assignment inherit the job |
 | 10 | The Windows CPU limit cannot exceed one CPU | on a multi-core machine the limit is tighter than the policy; now warned about | the Win32 percentage CPU rate control has no multi-CPU form |

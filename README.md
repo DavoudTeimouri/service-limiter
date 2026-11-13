@@ -128,7 +128,7 @@ resulting limit is tighter than the policy asked for.
 
 ## Commands
 
-### `service-limiter analyze [--profile NAME] [--json]`
+### `service-limiter analyze [--profile NAME | --profile-file FILE] [--json] [--watch SECONDS]`
 
 Discovers services and measures them. Prints every measured service with its
 CPU, memory and I/O usage, and lists separately the ones over the policy with
@@ -136,6 +136,13 @@ the values that put them there.
 
 ```bash
 service-limiter analyze --profile web-server
+```
+
+`--profile-file FILE` uses a user-supplied JSON profile instead of a bundled
+one (same schema: `cpu_percent`, `memory_mb`, `io_read_kbps`, `io_write_kbps`):
+
+```bash
+service-limiter analyze --profile-file ./my-profile.json
 ```
 
 `--json` prints the same data as JSON instead, for scripts and monitoring
@@ -147,14 +154,27 @@ service-limiter analyze --json | jq '.profiles | to_entries[] | select(.value.cp
 
 The JSON carries `discovered`, `profiled`, `over_policy`, the `policy` in
 force, a `violations` map keyed by service, and the `services` and `profiles`
-measurements. Exit codes are unchanged: `0` clean, `1` over policy, `2` error.
+measurements. Exit codes: `0` clean, `1` over policy, `2` error, `4` nothing
+measurable.
 
-### `service-limiter generate --profile NAME [--output DIR] [--io-device PATH]`
+`--watch SECONDS` repeats the human-readable report every SECONDS (default 5)
+until interrupted, timestamping each round. Useful for watching a service come
+back under the limit without re-running the command. Cannot combine with
+`--json` (machine output is one-shot).
+
+### `service-limiter generate --profile NAME | --profile-file FILE [--output DIR] [--io-device PATH]`
 
 Writes configs for every service over the policy.
 
 ```bash
 service-limiter generate --profile web-server --output ./config
+```
+
+`--profile-file FILE` uses a user-supplied JSON profile instead of a bundled
+one:
+
+```bash
+service-limiter generate --profile-file ./my-profile.json --output ./config
 ```
 
 Creates `./config/<service>/override.conf` on Linux or
@@ -182,7 +202,7 @@ Installs staged configs.
 |---|---|
 | `--dry-run` | print what would happen, change nothing |
 | `--yes` | skip the per-service confirmation |
-| `--durable` | Windows only: keep a holder process alive so the limits persist |
+| `--durable` | Windows only: keep a holder process alive so the limits persist, and register a boot-time task so they survive a reboot |
 
 On Linux, in order: verify the drop-in with `systemd-analyze verify` (**before**
 touching `/etc`), back up any existing `override.conf` to `.bak`, then
@@ -203,8 +223,9 @@ sudo service-limiter revert --config ./config --yes
 
 On Windows there is nothing to remove from disk: the limits live in a Job
 Object held by the durable holder process. `revert` stops that holder, which
-closes the handle and releases the limits. Its PID is recorded in the tool's
-home, so it is found even after the config directory is deleted.
+closes the handle and releases the limits, and also removes the boot-time task
+so the limits cannot return at the next reboot. The holder PID is recorded in
+the tool's home, so it is found even after the config directory is deleted.
 
 ### `service-limiter status --config DIR`
 
@@ -214,6 +235,11 @@ restorable backup exists.
 ```bash
 service-limiter status --config ./config
 ```
+
+On Linux, `status` also compares the staged config against the installed
+drop-in and reports **drift** when they differ (e.g. a hand edit or an older
+`generate` run). Drift is not a failure: re-run `apply --yes` to re-install
+the staged config.
 
 ---
 
@@ -242,6 +268,9 @@ from `service_limiter/profiles/`.
 
 A missing or malformed profile is a **hard error**, never a silent fallback.
 
+`--profile-file FILE` loads the same schema from a path instead of the bundled
+set; the file's stem becomes the profile name in reports and the audit log.
+
 `cpu_percent` is a share of the **whole machine**. Both the measurement and the
 generated limit are normalized to match, so `50` on a 4-core box emits
 `CPUQuota=200%` (systemd counts per-CPU). Core count follows the cgroup CPU
@@ -256,10 +285,11 @@ quota, so a container capped at 1 CPU reports 1. See
 |---|---|
 | `0` | ran clean, nothing over policy |
 | `1` | at least one service exceeded the policy |
-| `2` | error, no systemd, nothing measurable, or bad config |
+| `2` | error, no systemd, or bad config |
 | `3` | `apply` needs root (Linux) |
+| `4` | nothing measurable (no live MainPID, or needs root) |
 
-Zero measurable services exits `2`, so exit `0` always means the tool really worked.
+Zero measurable services exits `4`, so exit `0` always means the tool really worked.
 
 ---
 
@@ -284,7 +314,7 @@ limit because of it is worse.
 ## Troubleshooting
 
 - **"systemctl not found"** - this host does not run systemd, which Linux support requires.
-- **Exit 2 from `analyze`** - no service could be profiled. Either no live MainPID, or reading process stats needs root.
+- **Exit 4 from `analyze`** - no service could be profiled. Either no live MainPID, or reading process stats needs root.
 - **"Profile not found"** - the error lists the available names.
 - **I/O limits missing from the drop-in** - your profile has no `io_device`, and systemd needs a block device path per limit. Set one with `--io-device /dev/sda1`.
 - **"AssignProcessToJobObject failed" on Windows** - the service is probably already inside a job object, common under IIS or a service host.

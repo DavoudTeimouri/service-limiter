@@ -13,6 +13,10 @@ pub struct Outcome {
     pub applied: usize,
     pub skipped: usize,
     pub failed: usize,
+    /// Drift detected between staged config and installed limits — not a
+    /// failure of this operation, but worth tracking separately so `status`
+    /// exit code doesn't conflate "drift found" with "apply failed".
+    pub drifted: usize,
 }
 
 impl Outcome {
@@ -145,6 +149,90 @@ fn holder_pid_path(service: &str) -> PathBuf {
     crate::audit::home().join(format!("holder-{service}.pid"))
 }
 
+/// The scheduled-task name for a service's boot-time holder.
+///
+/// A namespaced name (`Folder\Name`) keeps the tool's tasks out of everyone
+/// else's task list, and one task per service (not one task for all) means
+/// `revert` can remove exactly the service it is reverting.
+fn task_name(service: &str) -> String {
+    format!("ServiceLimiter\\{service}")
+}
+
+/// `schtasks` arguments that re-create the durable holder at boot.
+///
+/// Built (and testable) as data rather than run inline, so both platform
+/// paths stay compilable everywhere and the contract is visible without a
+/// Windows host. `-StatusFile` is deliberately absent: at boot nobody waits
+/// on it, and the task runs detached.
+fn schedule_holder_args(shell: &str, staged: &Path, service: &str) -> Vec<String> {
+    vec![
+        "/Create".to_string(),
+        "/F".to_string(),
+        "/SC".to_string(),
+        "ONSTART".to_string(),
+        "/RU".to_string(),
+        "".to_string(),
+        "/TN".to_string(),
+        task_name(service),
+        "/TR".to_string(),
+        format!(
+            "\\\"{shell}\\\" -NoProfile -ExecutionPolicy Bypass -File '{}' -Durable",
+            staged.display().to_string().replace('\'', "''")
+        ),
+    ]
+}
+
+/// Register the boot-time holder task. A failure is a hard error: the whole
+/// point of `--durable` is that the limits survive, and silently keeping a
+/// holder that dies at the next reboot would promise less than the user asked
+/// for with no indication anything was lost.
+fn schedule_holder(shell: &str, staged: &Path, service: &str) -> std::io::Result<()> {
+    let out = Command::new("schtasks")
+        .args(schedule_holder_args(shell, staged, service))
+        .output()
+        .map_err(|e| std::io::Error::other(format!("cannot run schtasks: {e}")))?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "schtasks /Create failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    println!(
+        "survives reboot: scheduled task '{}' as SYSTEM, re-created at boot",
+        task_name(service)
+    );
+    Ok(())
+}
+
+/// Remove the boot-time holder task. Best effort: reverting must not fail
+/// just because a task is already gone.
+fn unschedule_holder(service: &str) {
+    let out = Command::new("schtasks")
+        .args(["/Delete", "/TN", &task_name(service), "/F"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("removed scheduled task '{}'", task_name(service))
+        }
+        Ok(o) => eprintln!(
+            "note: could not remove scheduled task '{}': {}",
+            task_name(service),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("note: cannot run schtasks: {e}"),
+    }
+}
+
+/// Whether the boot-time holder task is registered, for `status`.
+fn holder_task_registered(service: &str) -> bool {
+    Command::new("schtasks")
+        .args(["/Query", "/TN", &task_name(service)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Stop the durable holder for a service, if one is running.
 ///
 /// The holder is the process that holds the Job Object handle open. Killing
@@ -220,6 +308,10 @@ pub fn revert(config_dir: &Path, dry_run: bool, assume_yes: bool) -> std::io::Re
                     out.failed += 1;
                 }
             }
+            // Also remove the boot-time task so limits can't return at the
+            // next reboot. Best effort: reverting must not fail if the task
+            // is already gone.
+            unschedule_holder(&service);
             continue;
         }
 
@@ -317,24 +409,103 @@ pub fn status(config_dir: &Path) -> std::io::Result<Outcome> {
                 ),
                 Err(_) => println!("{service}: no durable holder; Windows limits lapse with it"),
             }
+            // The boot-time task survives the holder process; report it so the
+            // operator knows limits will return at the next reboot.
+            if holder_task_registered(&service) {
+                println!(
+                    "  boot task '{}' registered: survives reboot",
+                    task_name(&service)
+                );
+            }
             continue;
         }
 
         let target = installed_path(&service);
-        if target.exists() {
-            let backup = target.with_extension("conf.bak");
-            let restorable = if backup.exists() {
-                " (backup present)"
-            } else {
-                ""
-            };
-            println!("{service}: installed at {}{restorable}", target.display());
-            out.applied += 1;
-        } else {
+        if !target.exists() {
             println!("{service}: not installed");
+            continue;
         }
+        let backup = target.with_extension("conf.bak");
+        let restorable = if backup.exists() {
+            " (backup present)"
+        } else {
+            ""
+        };
+        println!("{service}: installed at {}{restorable}", target.display());
+
+        // The installed file is what the OS enforces (effective); the staged
+        // file is what the operator last generated (asked). They can drift:
+        // an old drop-in the tool never rewrote, a hand edit, or a `generate`
+        // with a different profile than the one applied. Saying "installed"
+        // alone would hide all three.
+        let staged = service_dir.join("override.conf");
+        let asked = fs::read_to_string(&staged).ok();
+        let effective = fs::read_to_string(&target).ok();
+        match (asked.as_deref(), effective.as_deref()) {
+            (Some(asked), Some(effective)) => match diff_limits(asked, effective) {
+                None => println!("  limits match the staged config"),
+                Some(diff) => {
+                    println!("  DRIFTED: effective limits differ from the staged config");
+                    for line in diff {
+                        println!("    {line}");
+                    }
+                    println!("    re-run 'apply --yes' to install the staged config");
+                    out.drifted += 1;
+                }
+            },
+            // No staged config (or unreadable) says nothing about drift.
+            _ => {
+                for (key, value) in parse_limits(effective.as_deref().unwrap_or("")) {
+                    println!("  effective {key}={value}");
+                }
+            }
+        }
+        out.applied += 1;
     }
     Ok(out)
+}
+
+/// Every `Key=Value` line in the drop-in, so drift detection covers any
+/// directive the operator staged — not only the four this tool writes.
+fn parse_limits(content: &str) -> Vec<(String, String)> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim().split_once('=')?;
+            let key = key.trim();
+            let value = value.trim();
+            (!key.is_empty() && !value.is_empty()).then(|| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Keys whose installed value differs from the staged value, or which are
+/// missing from one side. `None` means the effective set matches the asked set.
+fn diff_limits(asked: &str, effective: &str) -> Option<Vec<String>> {
+    let asked = parse_limits(asked);
+    let effective = parse_limits(effective);
+    let mut keys: Vec<&str> = asked.iter().map(|(k, _)| k.as_str()).collect();
+    keys.extend(effective.iter().map(|(k, _)| k.as_str()));
+    keys.sort_unstable();
+    keys.dedup();
+    let value_of = |set: &[(String, String)], key: &str| -> String {
+        set.iter()
+            .find(|(k, _)| k.as_str() == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "(absent)".to_string())
+    };
+    let diff: Vec<String> = keys
+        .into_iter()
+        .filter(|key| value_of(&asked, key) != value_of(&effective, key))
+        .map(|key| {
+            format!(
+                "{key}: staged {}, installed {}",
+                value_of(&asked, key),
+                value_of(&effective, key)
+            )
+        })
+        .collect();
+    (!diff.is_empty()).then_some(diff)
 }
 
 fn confirm(service: &str) -> bool {
@@ -461,11 +632,17 @@ fn validate_staged(staged: &Path, filename: &str) -> Result<(), VerifyError> {
 }
 
 /// Ask systemd whether it understands every line, by verifying a probe unit.
+///
+/// The probe mirrors a real drop-in exactly: one `[Unit]` description plus
+/// the drop-in body (which starts with `[Service]`). Prepending a second
+/// `[Service]` section made the probe merge sections differently than the
+/// file we actually install, so a directive could pass the gate here and be
+/// silently ignored on the real unit.
 fn verify_with_systemd_analyze(content: &str) -> Result<(), VerifyError> {
     let mut probe = tempfile::NamedTempFile::with_suffix(".service")
         .map_err(|e| VerifyError::Unavailable(format!("cannot create probe file: {e}")))?;
     probe
-        .write_all(b"[Service]\nExecStart=/bin/true\n")
+        .write_all(b"[Unit]\nDescription=service-limiter probe\n")
         .and_then(|()| probe.write_all(content.as_bytes()))
         .map_err(|e| VerifyError::Unavailable(format!("cannot write probe file: {e}")))?;
 
@@ -555,13 +732,31 @@ fn install_windows(service: &str, staged: &Path, durable: bool) -> std::io::Resu
                         pid_file.display()
                     );
                 }
-                println!(
-                    "Durable limits active. Holder process PID {}; stop it with \
-                     'Stop-Process -Id {}' to release the limits.",
-                    child.id(),
-                    child.id()
-                );
-                Ok(true)
+                // A holder dies at the next reboot, and with it the limits.
+                // Registering the task is what makes `--durable` true to its
+                // name; a failure here fails the apply. If registration fails
+                // after the holder is already running, stop the holder so we
+                // never leave one that won't survive reboot (orphaned limits).
+                match schedule_holder(shell, staged, service) {
+                    Ok(()) => {
+                        println!(
+                            "Durable limits active. Holder process PID {}; stop it with \
+                             'Stop-Process -Id {}' (or 'revert') to release the limits.",
+                            child.id(),
+                            child.id()
+                        );
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        let _ = Command::new("taskkill")
+                            .args(["/PID", &child.id().to_string(), "/F"])
+                            .status();
+                        let _ = fs::remove_file(&pid_file);
+                        Err(std::io::Error::other(format!(
+                            "{service}: durable limits applied but boot task not registered: {e}"
+                        )))
+                    }
+                }
             }
             Some(line) => Err(std::io::Error::other(line)),
             None => Err(std::io::Error::other(format!(
@@ -661,5 +856,40 @@ mod tests {
         let path = holder_pid_path("sshd");
         assert!(path.starts_with(crate::audit::home()), "{path:?}");
         assert!(path.to_string_lossy().contains("sshd"), "{path:?}");
+    }
+
+    /// Drift detection catches any changed directive, not just the four the
+    /// tool writes by default.
+    #[test]
+    fn diff_limits_catches_changed_and_missing_keys() {
+        let asked = "[Service]\nCPUQuota=200%\nMemoryMax=256M\n";
+        let effective = "[Service]\nCPUQuota=100%\nMemoryMax=256M\nTasksMax=500\n";
+
+        let diff = diff_limits(asked, effective).expect("drift should be reported");
+        assert!(diff
+            .iter()
+            .any(|d| d.contains("CPUQuota: staged 200%, installed 100%")));
+        assert!(diff
+            .iter()
+            .any(|d| d.contains("TasksMax: staged (absent), installed 500")));
+        // MemoryMax is unchanged, so it must not appear.
+        assert!(!diff.iter().any(|d| d.contains("MemoryMax")));
+    }
+
+    /// Identical configs produce no drift.
+    #[test]
+    fn diff_limits_no_drift_when_identical() {
+        let asked = "[Service]\nCPUQuota=200%\nMemoryMax=256M\n";
+        let effective = "[Service]\nCPUQuota=200%\nMemoryMax=256M\n";
+        assert!(diff_limits(asked, effective).is_none());
+    }
+
+    /// parse_limits captures every Key=Value line, not just known ones.
+    #[test]
+    fn parse_limits_captures_all_keys() {
+        let content = "[Service]\nCPUQuota=50%\nCustomKey=weird\nMemoryMax=256M\n";
+        let pairs = parse_limits(content);
+        assert!(pairs.iter().any(|(k, v)| k == "CustomKey" && v == "weird"));
+        assert!(pairs.iter().any(|(k, v)| k == "CPUQuota" && v == "50%"));
     }
 }

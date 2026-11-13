@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+
 use clap::{Parser, Subcommand};
 use models::Policy;
 
@@ -29,6 +32,11 @@ mod exit {
     /// `apply` needs root (Linux only; Windows has no geteuid).
     #[allow(dead_code)]
     pub const NEEDS_ROOT: u8 = 3;
+    /// The tool ran clean but nothing was measurable (no live MainPID, or
+    /// reading process stats needs root). A distinct code so a script can
+    /// tell a healthy, empty host apart from a broken run. `ERROR` would
+    /// make both look the same.
+    pub const NOTHING_MEASURED: u8 = 4;
 }
 
 #[derive(Parser)]
@@ -44,14 +52,24 @@ enum Command {
     Analyze {
         #[arg(long)]
         profile: Option<String>,
+        /// JSON profile file to use instead of a bundled profile.
+        #[arg(long, conflicts_with = "profile", value_name = "FILE")]
+        profile_file: Option<PathBuf>,
         /// Emit JSON instead of the human-readable report.
         #[arg(long)]
         json: bool,
+        /// Keep measuring every round, sleeping SECONDS between rounds
+        /// (default 5); Ctrl-C stops it.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "5")]
+        watch: Option<u64>,
     },
     /// Write configs for every service over the policy.
     Generate {
         #[arg(long)]
         profile: String,
+        /// JSON profile file to use instead of a bundled profile.
+        #[arg(long, conflicts_with = "profile", value_name = "FILE")]
+        profile_file: Option<PathBuf>,
         #[arg(long, default_value = "./config")]
         output: PathBuf,
         /// Block device for the I/O bandwidth limits, e.g. /dev/sda1.
@@ -94,12 +112,23 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Analyze { profile, json } => analyze(profile.as_deref(), json),
+        Command::Analyze {
+            profile,
+            profile_file,
+            json,
+            watch,
+        } => analyze(profile.as_deref(), profile_file.as_deref(), json, watch),
         Command::Generate {
             profile,
+            profile_file,
             output,
             io_device,
-        } => generate(&profile, &output, io_device.as_deref()),
+        } => generate(
+            profile.as_str(),
+            profile_file.as_deref(),
+            &output,
+            io_device.as_deref(),
+        ),
         Command::Apply {
             config,
             dry_run,
@@ -116,66 +145,98 @@ fn main() -> ExitCode {
     ExitCode::from(result)
 }
 
-fn resolve_policy(name: Option<&str>) -> Result<Policy, u8> {
-    match name {
-        Some(n) => profile::load(n).map_err(|e| {
-            eprintln!("error: {e}");
-            exit::ERROR
-        }),
-        None => Ok(Policy::default()),
-    }
+/// Bundled profile by name, or a user-supplied JSON file. clap enforces the
+/// exclusivity, so the unspecified case is the default policy.
+fn resolve_policy(name: Option<&str>, file: Option<&std::path::Path>) -> Result<Policy, u8> {
+    let policy = match (name, file) {
+        (Some(n), None) => profile::load(n),
+        (None, Some(path)) => profile::load_file(path),
+        (None, None) => return Ok(Policy::default()),
+        (Some(_), Some(_)) => {
+            // clap's `conflicts_with` makes this unreachable; fall back to an
+            // error instead of panicking if clap's contract ever changes.
+            eprintln!("error: --profile and --profile-file are mutually exclusive");
+            return Err(exit::ERROR);
+        }
+    };
+    policy.map_err(|e| {
+        eprintln!("error: {e}");
+        exit::ERROR
+    })
 }
 
-fn analyze(profile_name: Option<&str>, json: bool) -> u8 {
-    let policy = match resolve_policy(profile_name) {
+fn analyze(
+    profile_name: Option<&str>,
+    profile_file: Option<&std::path::Path>,
+    json: bool,
+    watch: Option<u64>,
+) -> u8 {
+    let policy = match resolve_policy(profile_name, profile_file) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let result = match orchestrator::run(&policy) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            audit::record(
-                "analyze_error",
-                &[("error", e.clone()), ("profile", policy.name.clone())],
-            );
-            return exit::ERROR;
-        }
-    };
+    // --watch repeats the human report; JSON is a one-shot machine document.
+    if json && watch.is_some() {
+        eprintln!("error: --watch prints the human report; drop --json or --watch.");
+        return exit::ERROR;
+    }
 
-    // Zero measurable services means we could not actually do the job, which
-    // must not look like a clean run. Checked before any output, so a JSON
-    // consumer never gets a report that claims success.
-    if result.profiles.is_empty() {
-        eprintln!("error: no service could be profiled (no live MainPID, or needs root)");
+    loop {
+        let result = match orchestrator::run(&policy) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                audit::record(
+                    "analyze_error",
+                    &[("error", e.clone()), ("profile", policy.name.clone())],
+                );
+                return exit::ERROR;
+            }
+        };
+
+        // Zero measurable services means we could not actually do the job,
+        // which must not look like a clean run. Checked before any output, so
+        // a JSON consumer never gets a report that claims success. A distinct
+        // exit code keeps a healthy, empty host apart from a broken one.
+        if result.profiles.is_empty() {
+            eprintln!("error: no service could be profiled (no live MainPID, or needs root)");
+            audit::record(
+                "analyze",
+                &[
+                    ("discovered", result.services.len().to_string()),
+                    ("profiled", "0".to_string()),
+                ],
+            );
+            return exit::NOTHING_MEASURED;
+        }
+
+        // Timestamp each round, so a scrolled-back report is readable.
+        if watch.is_some() {
+            println!("\n== {} ==", audit::timestamp());
+        }
+        if json {
+            print_json(&result, &policy);
+        } else {
+            print_report(&result, &policy);
+        }
+
         audit::record(
             "analyze",
             &[
                 ("discovered", result.services.len().to_string()),
-                ("profiled", "0".to_string()),
+                ("profiled", result.profiles.len().to_string()),
+                ("over_policy", result.over_policy.len().to_string()),
             ],
         );
-        return exit::ERROR;
-    }
-
-    if json {
-        print_json(&result, &policy);
-    } else {
-        print_report(&result, &policy);
-    }
-
-    audit::record(
-        "analyze",
-        &[
-            ("discovered", result.services.len().to_string()),
-            ("profiled", result.profiles.len().to_string()),
-            ("over_policy", result.over_policy.len().to_string()),
-        ],
-    );
-    if result.over_policy.is_empty() {
-        exit::OK
-    } else {
-        exit::VIOLATION
+        let code = if result.over_policy.is_empty() {
+            exit::OK
+        } else {
+            exit::VIOLATION
+        };
+        if watch.is_none() {
+            return code;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(watch.unwrap()));
     }
 }
 
@@ -261,10 +322,11 @@ fn json_doc(result: &orchestrator::Analysis, policy: &models::Policy) -> serde_j
 
 fn generate(
     profile_name: &str,
+    profile_file: Option<&std::path::Path>,
     output: &std::path::Path,
     io_device: Option<&std::path::Path>,
 ) -> u8 {
-    let mut policy = match resolve_policy(Some(profile_name)) {
+    let mut policy = match resolve_policy(Some(profile_name), profile_file) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -273,15 +335,50 @@ fn generate(
     // limit on a device that does not exist, so a typo would produce a
     // drop-in that installs cleanly and enforces nothing.
     if let Some(device) = io_device {
-        if !device.exists() {
+        // canonicalize() resolves symlinks so an attacker can't swap a symlink
+        // between the exists() check and the config write (TOCTOU). Only a
+        // real block device is accepted — a regular file would silently be
+        // ignored by systemd's IOReadBandwidthMax.
+        let canon = match device.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "error: I/O device {} does not exist. Check the path, or drop --io-device to skip the I/O limits.",
+                        device.display()
+                    )
+                } else {
+                    format!(
+                        "error: I/O device {} cannot be resolved: {e}",
+                        device.display()
+                    )
+                };
+                eprintln!("{msg}");
+                return exit::ERROR;
+            }
+        };
+        let meta = match std::fs::metadata(&canon) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "error: I/O device {} cannot be stat'd: {e}",
+                    canon.display()
+                );
+                return exit::ERROR;
+            }
+        };
+        // Only Linux has block devices (systemd IOReadBandwidthMax). On other
+        // platforms accept the canonical path without the block check.
+        #[cfg(unix)]
+        if !meta.file_type().is_block_device() {
             eprintln!(
-                "error: I/O device {} does not exist. Check the path, or drop \
-                 --io-device to skip the I/O limits.",
-                device.display()
+                "error: I/O device {} is not a block device; IO limits would \
+                 be silently ignored by systemd.",
+                canon.display()
             );
             return exit::ERROR;
         }
-        policy.io_device = Some(device.display().to_string());
+        policy.io_device = Some(canon.display().to_string());
     }
 
     let result = match orchestrator::run(&policy) {
